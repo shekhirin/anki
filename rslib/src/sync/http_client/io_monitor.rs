@@ -120,12 +120,16 @@ impl IoMonitor {
                 .await?
                 .error_for_status()?;
             map_redirect_to_error(&resp)?;
+            // Some sync servers omit an original-size header on full
+            // downloads. The size is only used for progress reporting and
+            // buffer sizing; zstd decoding still validates the response.
             let response_total = resp
                 .headers()
                 .get(&ORIGINAL_SIZE)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u32>().ok())
-                .or_bad_request("missing original size")?;
+                .or_else(|| resp.content_length().and_then(|v| u32::try_from(v).ok()))
+                .unwrap_or_default();
             let response_stream = self.wrap_stream(
                 false,
                 response_total,
