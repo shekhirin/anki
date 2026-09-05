@@ -16,10 +16,13 @@ name = "anki-api-server"
 anki = { workspace = true, features = ["rustls"] }
 anki_proto.workspace = true
 axum.workspace = true
+data-encoding.workspace = true
 dirs.workspace = true
 prost.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 toml.workspace = true
 tokio.workspace = true
 tower-http = { workspace = true, features = ["trace"] }

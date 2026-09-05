@@ -13,8 +13,39 @@ ANKI_API_PORT=8765 just api-server
 ```
 
 The server listens on `127.0.0.1` by default. Set `ANKI_API_HOST` if a
-different bind address is required. This initial implementation has no
-authentication, so do not bind it to a public interface.
+different bind address is required. Configure `api_key` or `ANKI_API_KEY` when
+the server is reachable by untrusted clients.
+
+An AnkiConnect-compatible endpoint is available at `/`. It currently supports
+the protocol envelope and the `version`, `sync`, `findCards`, `findNotes`,
+`requestPermission`, `notesInfo`, `cardsToNotes`, `cardsInfo`, `answerCards`, `addNote`,
+`addNotes`, `deleteNotes`, `getNoteTags`, `updateNoteFields`,
+`updateNoteTags`, `addTags`, `removeTags`, `replaceTags`,
+`canAddNote`, `canAddNotes`, `canAddNotesWithErrorDetail`, `getTags`,
+`storeMediaFile`, `retrieveMediaFile`,
+`getMediaFilesNames`, `deleteMediaFile`, `getMediaDirPath`,
+`createDeck`, `deleteDecks`, `deckNames`, `deckNamesAndIds`, `modelNames`,
+`modelNamesAndIds`, `suspend`, `unsuspend`, `suspended`, `areSuspended`, and
+`getEaseFactors`, `setEaseFactors`, `cardsModTime`, `deckNameFromId`,
+`modelNameFromId`, `modelFieldNames`, `getDecks`, `changeDeck`, and `multi`.
+`apiReflect`, `guiBrowse`, and `guiEditNote` are also exposed with headless
+semantics: `guiBrowse` returns matching card IDs without opening a window, and
+`guiEditNote` reports that a GUI is unavailable.
+
+`addNote` and `addNotes` process AnkiConnect media fields. Each `audio` or
+`video` attachment is stored in the collection media folder and appended to its
+listed fields as `[sound:filename]`; each `picture` attachment is appended as
+an HTML image. Attachments can use base64 `data` or a local `path`. Remote
+`url` attachments are rejected for now.
+
+Additional actions are still being added as the compatibility layer is
+completed:
+
+```bash
+curl -X POST http://127.0.0.1:8765 \
+  -H 'content-type: application/json' \
+  -d '{"action":"version","version":6}'
+```
 
 On first startup, the server creates `~/.anki/server.toml` if it does not
 exist, using safe local defaults and commented sync examples. Settings may
@@ -23,6 +54,8 @@ then be customized there:
 ```toml
 host = "127.0.0.1"
 port = 8765
+# Optional AnkiConnect key; keep it in a secret manager for remote deployments.
+# api_key = "change-me"
 collection_path = "/path/to/collection.anki2"
 sync_username = "your-ankiweb-user"
 sync_password = "your-password"
@@ -33,7 +66,7 @@ sync_media = true
 ```
 
 Environment variables take precedence over the corresponding TOML setting:
-`ANKI_API_HOST`, `ANKI_API_PORT`, `ANKI_API_COLLECTION_PATH`, `ANKI_API_SYNC_USERNAME`,
+`ANKI_API_HOST`, `ANKI_API_PORT`, `ANKI_API_KEY`, `ANKI_API_COLLECTION_PATH`, `ANKI_API_SYNC_USERNAME`,
 `ANKI_API_SYNC_PASSWORD`, `ANKI_API_SYNC_ENDPOINT`,
 `ANKI_API_SYNC_INTERVAL_SECS`, `ANKI_API_SYNC_AFTER_ADD`, and
 `ANKI_API_SYNC_MEDIA`. The file is optional; malformed TOML prevents startup.
