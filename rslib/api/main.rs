@@ -664,7 +664,7 @@ impl SyncController {
                     .backend
                     .api_sync_collection(controller.auth.clone(), controller.sync_media)
                     .map(|response| format!("completed (required={})", response.required))
-                    .map_err(|error| error.to_string()),
+                    .map_err(|error| format!("{error:?}")),
                 SyncOperation::Full { upload } => controller
                     .backend
                     .api_full_upload_or_download(controller.auth.clone(), upload, None)
@@ -675,7 +675,7 @@ impl SyncController {
                             "completed (full_download)".to_string()
                         }
                     })
-                    .map_err(|error| error.to_string()),
+                    .map_err(|error| format!("{error:?}")),
             };
             controller.runtime.total.fetch_add(1, Ordering::Relaxed);
             if result.is_err() {
