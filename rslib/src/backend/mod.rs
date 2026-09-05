@@ -5,6 +5,7 @@ mod adding;
 mod ankidroid;
 mod ankihub;
 mod ankiweb;
+mod api;
 mod card_rendering;
 mod collection;
 mod config;
@@ -100,6 +101,11 @@ impl Backend {
 
     pub fn i18n(&self) -> &I18n {
         &self.tr
+    }
+
+    /// Returns whether a collection is currently open.
+    pub fn collection_is_open(&self) -> bool {
+        self.col.lock().unwrap().is_some()
     }
 
     pub fn run_db_command_bytes(&self, input: &[u8]) -> result::Result<Vec<u8>, Vec<u8>> {

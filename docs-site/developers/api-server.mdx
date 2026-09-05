@@ -1,0 +1,124 @@
+---
+title: "Headless API server"
+---
+
+The repository includes an experimental headless HTTP API server for local
+automation and service development. It runs without Qt or a display and owns
+one open collection per process.
+
+## Running from a source checkout
+
+```bash
+ANKI_API_PORT=8765 just api-server
+```
+
+The server listens on `127.0.0.1` by default. Set `ANKI_API_HOST` if a
+different bind address is required. This initial implementation has no
+authentication, so do not bind it to a public interface.
+
+On first startup, the server creates `~/.anki/server.toml` if it does not
+exist, using safe local defaults and commented sync examples. Settings may
+then be customized there:
+
+```toml
+host = "127.0.0.1"
+port = 8765
+collection_path = "/path/to/collection.anki2"
+sync_username = "your-ankiweb-user"
+sync_password = "your-password"
+sync_endpoint = "https://sync.ankiweb.net"
+sync_interval_secs = 300
+sync_after_add = true
+sync_media = true
+```
+
+Environment variables take precedence over the corresponding TOML setting:
+`ANKI_API_HOST`, `ANKI_API_PORT`, `ANKI_API_COLLECTION_PATH`, `ANKI_API_SYNC_USERNAME`,
+`ANKI_API_SYNC_PASSWORD`, `ANKI_API_SYNC_ENDPOINT`,
+`ANKI_API_SYNC_INTERVAL_SECS`, `ANKI_API_SYNC_AFTER_ADD`, and
+`ANKI_API_SYNC_MEDIA`. The file is optional; malformed TOML prevents startup.
+When `collection_path` is configured, the collection is opened automatically
+before the server starts. Paths beginning with `~/` are expanded using the
+current user's home directory.
+
+## Automatic sync
+
+Automatic sync is enabled by providing sync credentials and either a timer or
+the after-note trigger:
+
+```bash
+export ANKI_API_SYNC_USERNAME='your-ankiweb-user'
+export ANKI_API_SYNC_PASSWORD='your-password'
+export ANKI_API_SYNC_INTERVAL_SECS=300
+export ANKI_API_SYNC_AFTER_ADD=true
+export ANKI_API_SYNC_MEDIA=true
+```
+
+`ANKI_API_SYNC_ENDPOINT` may be set for a custom sync server. Timer and
+after-note syncs are coalesced while another sync is active. If Anki reports
+that a full upload or download is required, the result is recorded but the
+server does not choose a destructive full-sync direction automatically.
+
+Inspect the current state with:
+
+```bash
+curl http://127.0.0.1:8765/v1/sync/status
+```
+
+Prometheus-compatible metrics are available at:
+
+```bash
+curl http://127.0.0.1:8765/v1/metrics
+```
+
+The endpoint reports uptime, collection state, HTTP request totals/errors and
+duration, plus sync attempts, failures, in-progress state, and the timestamp
+of the last successful sync.
+
+
+## Endpoints
+
+Check the server:
+
+```bash
+curl http://127.0.0.1:8765/health
+```
+
+Open a collection, list decks, create a note, and close it:
+
+```bash
+curl -X POST http://127.0.0.1:8765/v1/collection/open \
+  -H 'content-type: application/json' \
+  -d '{"collection_path":"/path/to/collection.anki2"}'
+
+curl http://127.0.0.1:8765/v1/decks
+
+curl 'http://127.0.0.1:8765/v1/cards/search?query=deck:current'
+
+curl -X POST http://127.0.0.1:8765/v1/notes \
+  -H 'content-type: application/json' \
+  -d '{
+    "deck_name":"Default",
+    "model_name":"Basic",
+    "fields":["front","back"],
+    "tags":["api"]
+  }'
+
+curl http://127.0.0.1:8765/v1/notes/{note_id}
+
+curl http://127.0.0.1:8765/v1/cards/{card_id}
+
+curl -X POST http://127.0.0.1:8765/v1/cards/{card_id}/answer \
+  -H 'content-type: application/json' \
+  -d '{"rating":3}'
+
+curl -X POST http://127.0.0.1:8765/v1/collection/close
+```
+
+The API currently includes health, collection open/close, deck listing, card
+search and lookup, note lookup and creation, and card answering. Note creation
+accepts either numeric `deck_id`/`notetype_id` values or the more convenient
+`deck_name`/`model_name` values. Fields are supplied in notetype field order.
+
+The server is intended to grow around stable JSON endpoints rather than expose
+the generated internal protobuf method indices directly.
