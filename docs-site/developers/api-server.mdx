@@ -98,6 +98,28 @@ Inspect the current state with:
 curl http://127.0.0.1:8765/v1/sync/status
 ```
 
+Manual sync operations are available separately from the AnkiConnect
+endpoint. Normal sync does not require confirmation; full upload and full
+download require an explicit confirmation string because they replace the
+local or remote collection:
+
+```bash
+curl -X POST http://127.0.0.1:8765/v1/sync \
+  -H 'content-type: application/json' \
+  -d '{"mode":"normal"}'
+
+curl -X POST http://127.0.0.1:8765/v1/sync \
+  -H 'content-type: application/json' \
+  -d '{"mode":"full_download","confirmation":"FULL_DOWNLOAD"}'
+
+curl -X POST http://127.0.0.1:8765/v1/sync \
+  -H 'content-type: application/json' \
+  -d '{"mode":"full_upload","confirmation":"FULL_UPLOAD"}'
+```
+
+The requests return `202 Accepted`; poll `/v1/sync/status` for the result.
+Only one sync operation can run at a time.
+
 Prometheus-compatible metrics are available at:
 
 ```bash

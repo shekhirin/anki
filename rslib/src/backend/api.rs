@@ -293,6 +293,22 @@ impl Backend {
         )
     }
 
+    pub fn api_full_upload_or_download(
+        &self,
+        auth: anki_proto::sync::SyncAuth,
+        upload: bool,
+        server_usn: Option<i32>,
+    ) -> Result<()> {
+        BackendSyncService::full_upload_or_download(
+            self,
+            anki_proto::sync::FullUploadOrDownloadRequest {
+                auth: Some(auth),
+                upload,
+                server_usn,
+            },
+        )
+    }
+
     pub fn api_answer_card(&self, card_id: i64, rating: i32) -> Result<()> {
         self.with_col(|col| {
             let queued = SchedulerService::get_queued_cards(

@@ -202,6 +202,12 @@ struct SyncRuntimeState {
     last_result: Mutex<Option<String>>,
 }
 
+#[derive(Clone, Copy)]
+enum SyncOperation {
+    Normal,
+    Full { upload: bool },
+}
+
 #[derive(Serialize)]
 struct SyncStatusResponse {
     configured: bool,
@@ -209,6 +215,26 @@ struct SyncStatusResponse {
     interval_secs: Option<u64>,
     in_progress: bool,
     last_result: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SyncMode {
+    Normal,
+    FullDownload,
+    FullUpload,
+}
+
+#[derive(Deserialize)]
+struct SyncRequest {
+    mode: SyncMode,
+    confirmation: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SyncAcceptedResponse {
+    accepted: bool,
+    mode: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -540,6 +566,7 @@ fn build_app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/", post(ankiconnect))
+        .route("/v1/sync", post(sync))
         .route("/v1/sync/status", get(sync_status))
         .route("/v1/metrics", get(metrics_endpoint))
         .route("/v1/collection/open", post(open_collection))
@@ -616,19 +643,40 @@ impl SyncController {
         }))
     }
 
-    fn trigger(&self, reason: &'static str) {
+    fn trigger(&self, reason: &'static str) -> bool {
+        self.trigger_operation(reason, SyncOperation::Normal)
+    }
+
+    fn trigger_full(&self, reason: &'static str, upload: bool) -> bool {
+        self.trigger_operation(reason, SyncOperation::Full { upload })
+    }
+
+    fn trigger_operation(&self, reason: &'static str, operation: SyncOperation) -> bool {
         if self.runtime.in_progress.swap(true, Ordering::AcqRel) {
             tracing::debug!(%reason, "skipping sync because another sync is active");
-            return;
+            return false;
         }
 
         let controller = self.clone();
         tokio::task::spawn_blocking(move || {
-            let result = controller
-                .backend
-                .api_sync_collection(controller.auth.clone(), controller.sync_media)
-                .map(|response| format!("completed (required={})", response.required))
-                .map_err(|error| error.to_string());
+            let result = match operation {
+                SyncOperation::Normal => controller
+                    .backend
+                    .api_sync_collection(controller.auth.clone(), controller.sync_media)
+                    .map(|response| format!("completed (required={})", response.required))
+                    .map_err(|error| error.to_string()),
+                SyncOperation::Full { upload } => controller
+                    .backend
+                    .api_full_upload_or_download(controller.auth.clone(), upload, None)
+                    .map(|_| {
+                        if upload {
+                            "completed (full_upload)".to_string()
+                        } else {
+                            "completed (full_download)".to_string()
+                        }
+                    })
+                    .map_err(|error| error.to_string()),
+            };
             controller.runtime.total.fetch_add(1, Ordering::Relaxed);
             if result.is_err() {
                 controller.runtime.failures.fetch_add(1, Ordering::Relaxed);
@@ -653,6 +701,7 @@ impl SyncController {
                 .in_progress
                 .store(false, Ordering::Release);
         });
+        true
     }
 
     fn status(&self) -> SyncStatusResponse {
@@ -695,6 +744,50 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
         status: "ok",
         collection_open: state.backend.collection_is_open(),
     })
+}
+
+async fn sync(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SyncRequest>,
+) -> impl IntoResponse {
+    let Some(controller) = &state.sync else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "sync is not configured");
+    };
+
+    let (mode, accepted) = match request.mode {
+        SyncMode::Normal => ("normal", controller.trigger("api-rest")),
+        SyncMode::FullDownload => {
+            if request.confirmation.as_deref() != Some("FULL_DOWNLOAD") {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "full download requires confirmation=FULL_DOWNLOAD",
+                );
+            }
+            ("full_download", controller.trigger_full("api-rest", false))
+        }
+        SyncMode::FullUpload => {
+            if request.confirmation.as_deref() != Some("FULL_UPLOAD") {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "full upload requires confirmation=FULL_UPLOAD",
+                );
+            }
+            ("full_upload", controller.trigger_full("api-rest", true))
+        }
+    };
+
+    if !accepted {
+        return error_response(StatusCode::CONFLICT, "a sync is already in progress");
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(SyncAcceptedResponse {
+            accepted: true,
+            mode,
+        }),
+    )
+        .into_response()
 }
 
 async fn ankiconnect(
