@@ -37,6 +37,9 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: Expose GitHub Actions runtime
+        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 #v4
+
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -44,6 +47,9 @@ jobs:
           push: true
           cache-from: type=gha,scope=anki-api-server
           cache-to: type=gha,mode=max,scope=anki-api-server
+          secret-envs: |
+            actions_results_url=ACTIONS_RESULTS_URL
+            actions_runtime_token=ACTIONS_RUNTIME_TOKEN
           tags: |
             ghcr.io/${{ github.repository }}:api-${{ github.sha }}
             ghcr.io/${{ github.repository }}:api-latest

@@ -11,6 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PROTOC=/usr/bin/protoc
+RUN cargo install sccache --locked --version 0.13.0
+ENV RUSTC_WRAPPER=/usr/local/cargo/bin/sccache
+ENV SCCACHE_GHA_ENABLED=true
 
 WORKDIR /build/anki
 
@@ -22,13 +25,17 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS build
 
 COPY --from=planner /build/anki/recipe.json recipe.json
-RUN --mount=type=cache,id=anki-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+RUN --mount=type=secret,id=actions_results_url,env=ACTIONS_RESULTS_URL \
+    --mount=type=secret,id=actions_runtime_token,env=ACTIONS_RUNTIME_TOKEN \
+    --mount=type=cache,id=anki-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=anki-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     cargo chef cook --locked --release --recipe-path recipe.json
 
 COPY . .
 RUN command -v protoc && protoc --version
-RUN --mount=type=cache,id=anki-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+RUN --mount=type=secret,id=actions_results_url,env=ACTIONS_RESULTS_URL \
+    --mount=type=secret,id=actions_runtime_token,env=ACTIONS_RUNTIME_TOKEN \
+    --mount=type=cache,id=anki-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=anki-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     cargo build --locked --release -p anki-api-server \
     && cp target/release/anki-api-server /tmp/anki-api-server
