@@ -844,14 +844,14 @@ async fn execute_anki_connect_request(
                 if request.key.as_deref() != Some(expected_key.as_str()) {
                     return Ok(serde_json::json!({
                         "permission": "denied",
-                        "requireApiKey": true,
+                        "requireApikey": true,
                         "version": 6,
                     }));
                 }
             }
             Ok(serde_json::json!({
                 "permission": "granted",
-                "requireApiKey": state.api_key.is_some(),
+                "requireApikey": state.api_key.is_some(),
                 "version": 6,
             }))
         }
@@ -1847,7 +1847,15 @@ async fn execute_anki_connect_request(
             for action in actions {
                 let nested: AnkiConnectRequest =
                     serde_json::from_value(action.clone()).map_err(|error| error.to_string())?;
-                responses.push(Box::pin(handle_anki_connect_request(state.clone(), nested)).await);
+                responses.push(
+                    match Box::pin(execute_anki_connect_request(state.clone(), nested)).await {
+                        Ok(result) => result,
+                        Err(error) => serde_json::json!({
+                            "result": null,
+                            "error": error,
+                        }),
+                    },
+                );
             }
             Ok(serde_json::to_value(responses).map_err(|error| error.to_string())?)
         }
