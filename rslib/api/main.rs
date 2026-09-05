@@ -751,7 +751,7 @@ async fn sync(
     Json(request): Json<SyncRequest>,
 ) -> impl IntoResponse {
     let Some(controller) = &state.sync else {
-        return error_response(StatusCode::SERVICE_UNAVAILABLE, "sync is not configured");
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "sync is not configured".into());
     };
 
     let (mode, accepted) = match request.mode {
@@ -760,7 +760,7 @@ async fn sync(
             if request.confirmation.as_deref() != Some("FULL_DOWNLOAD") {
                 return error_response(
                     StatusCode::BAD_REQUEST,
-                    "full download requires confirmation=FULL_DOWNLOAD",
+                    "full download requires confirmation=FULL_DOWNLOAD".into(),
                 );
             }
             ("full_download", controller.trigger_full("api-rest", false))
@@ -769,7 +769,7 @@ async fn sync(
             if request.confirmation.as_deref() != Some("FULL_UPLOAD") {
                 return error_response(
                     StatusCode::BAD_REQUEST,
-                    "full upload requires confirmation=FULL_UPLOAD",
+                    "full upload requires confirmation=FULL_UPLOAD".into(),
                 );
             }
             ("full_upload", controller.trigger_full("api-rest", true))
@@ -777,7 +777,7 @@ async fn sync(
     };
 
     if !accepted {
-        return error_response(StatusCode::CONFLICT, "a sync is already in progress");
+        return error_response(StatusCode::CONFLICT, "a sync is already in progress".into());
     }
 
     (
