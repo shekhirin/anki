@@ -40,6 +40,8 @@ jobs:
           context: .
           file: Dockerfile.api-server
           push: true
+          cache-from: type=gha,scope=anki-api-server
+          cache-to: type=gha,mode=max,scope=anki-api-server
           tags: |
             ghcr.io/${{ github.repository }}:api-${{ github.sha }}
             ghcr.io/${{ github.repository }}:api-latest
