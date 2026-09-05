@@ -187,7 +187,7 @@ fn create_default_config(path: &std::path::Path) -> Result<(), String> {
 #[derive(Clone)]
 struct SyncController {
     backend: Backend,
-    auth: SyncAuth,
+    auth: Arc<Mutex<SyncAuth>>,
     sync_media: bool,
     after_add: bool,
     interval_secs: Option<u64>,
@@ -629,7 +629,7 @@ impl SyncController {
 
         Ok(Some(Self {
             backend: backend.clone(),
-            auth,
+            auth: Arc::new(Mutex::new(auth)),
             sync_media: config.sync_media,
             after_add,
             interval_secs,
@@ -660,14 +660,20 @@ impl SyncController {
         let controller = self.clone();
         tokio::task::spawn_blocking(move || {
             let result = match operation {
-                SyncOperation::Normal => controller
-                    .backend
-                    .api_sync_collection(controller.auth.clone(), controller.sync_media)
-                    .map(|response| format!("completed (required={})", response.required))
-                    .map_err(|error| format!("{error:?}")),
+                SyncOperation::Normal => {
+                    let result = controller
+                        .backend
+                        .api_sync_collection(controller.current_auth(), controller.sync_media);
+                    if let Ok(response) = &result {
+                        controller.update_endpoint(response.new_endpoint.clone());
+                    }
+                    result
+                        .map(|response| format!("completed (required={})", response.required))
+                        .map_err(|error| format!("{error:?}"))
+                }
                 SyncOperation::Full { upload } => controller
                     .backend
-                    .api_full_upload_or_download(controller.auth.clone(), upload, None)
+                    .api_full_upload_or_download(controller.current_auth(), upload, None)
                     .map(|_| {
                         if upload {
                             "completed (full_upload)".to_string()
@@ -702,6 +708,16 @@ impl SyncController {
                 .store(false, Ordering::Release);
         });
         true
+    }
+
+    fn current_auth(&self) -> SyncAuth {
+        self.auth.lock().unwrap().clone()
+    }
+
+    fn update_endpoint(&self, endpoint: Option<String>) {
+        if let Some(endpoint) = endpoint {
+            self.auth.lock().unwrap().endpoint = Some(endpoint);
+        }
     }
 
     fn status(&self) -> SyncStatusResponse {
