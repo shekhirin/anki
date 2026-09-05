@@ -1,0 +1,45 @@
+name: Anki API Server Image
+
+on:
+  push:
+    branches: [alexey/anki-api-server]
+    paths:
+      - "Dockerfile.api-server"
+      - "rslib/**"
+      - "proto/**"
+      - "ftl/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/api-server-image.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: anki-api-server-image
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api-server
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:api-${{ github.sha }}
+            ghcr.io/${{ github.repository }}:api-latest
