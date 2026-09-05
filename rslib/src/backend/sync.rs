@@ -404,7 +404,7 @@ impl Backend {
         server_usn: Option<Usn>,
         upload: bool,
     ) -> Result<()> {
-        let auth: SyncAuth = input.try_into()?;
+        let mut auth: SyncAuth = input.try_into()?;
         let auth2 = auth.clone();
         self.abort_media_sync_and_wait();
 
@@ -416,6 +416,16 @@ impl Backend {
         }
 
         let col_inner = col.take().unwrap();
+
+        // Full upload/download bypasses the normal sync flow, which normally
+        // resolves AnkiWeb's current sync endpoint via the meta request first.
+        // Resolve it here as well, otherwise AnkiWeb may return a 303 during
+        // the streamed full transfer, whose request body cannot be replayed by
+        // reqwest.
+        let mut endpoint_client = HttpSyncClient::new(auth.clone(), self.web_client());
+        let local = col_inner.sync_meta()?;
+        rt.block_on(online_sync_status_check(local, &mut endpoint_client))?;
+        auth.endpoint = Some(endpoint_client.endpoint.clone());
 
         let (_guard, abort_reg) = self.sync_abort_handle()?;
 
