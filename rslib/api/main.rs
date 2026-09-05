@@ -245,6 +245,7 @@ struct AnkiConnectRequest {
 #[derive(Serialize)]
 struct AnkiConnectResponse {
     result: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
@@ -2198,7 +2199,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let response: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(response["error"], serde_json::Value::Null);
+        assert!(!response.as_object().unwrap().contains_key("error"));
         let note_id = response["result"].as_i64().unwrap();
 
         let response: serde_json::Value = client
