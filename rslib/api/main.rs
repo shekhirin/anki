@@ -242,13 +242,6 @@ struct AnkiConnectRequest {
     key: Option<String>,
 }
 
-#[derive(Serialize)]
-struct AnkiConnectResponse {
-    result: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
 #[derive(Deserialize)]
 struct AnkiConnectMediaInput {
     filename: String,
@@ -707,25 +700,21 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
 async fn ankiconnect(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AnkiConnectRequest>,
-) -> Json<AnkiConnectResponse> {
+) -> Json<serde_json::Value> {
     Json(handle_anki_connect_request(state, request).await)
 }
 
 async fn handle_anki_connect_request(
     state: Arc<AppState>,
     request: AnkiConnectRequest,
-) -> AnkiConnectResponse {
+) -> serde_json::Value {
+    let legacy_version = request.version <= 4;
     let result = execute_anki_connect_request(state, request).await;
 
     match result {
-        Ok(result) => AnkiConnectResponse {
-            result,
-            error: None,
-        },
-        Err(error) => AnkiConnectResponse {
-            result: serde_json::Value::Null,
-            error: Some(error),
-        },
+        Ok(result) if legacy_version => result,
+        Ok(result) => serde_json::json!({"result": result}),
+        Err(error) => serde_json::json!({"result": null, "error": error}),
     }
 }
 
@@ -2170,6 +2159,36 @@ mod tests {
         let base_url = format!("http://{address}");
         let tempdir = tempfile::tempdir().unwrap();
         let collection_path = tempdir.path().join("collection.anki2");
+
+        let response: serde_json::Value = client
+            .post(&base_url)
+            .json(&serde_json::json!({
+                "action": "version",
+                "version": 2,
+                "params": {}
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(response, serde_json::json!(6));
+
+        let response: serde_json::Value = client
+            .post(&base_url)
+            .json(&serde_json::json!({
+                "action": "version",
+                "version": 6,
+                "params": {}
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(response, serde_json::json!({"result": 6}));
 
         let response = client
             .post(format!("{base_url}/v1/collection/open"))
