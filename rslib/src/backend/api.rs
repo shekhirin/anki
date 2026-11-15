@@ -166,6 +166,22 @@ impl Backend {
         })
     }
 
+    pub fn api_notetype_styling(&self, name: String) -> Result<String> {
+        self.with_col(|col| {
+            let notetype = col.get_notetype_by_name(&name)?.or_not_found(name)?;
+            Ok(notetype.config.css.clone())
+        })
+    }
+
+    pub fn api_update_notetype_styling(&self, name: String, css: String) -> Result<()> {
+        self.with_col(|col| {
+            let mut notetype = (*col.get_notetype_by_name(&name)?.or_not_found(name)?).clone();
+            notetype.config.css = css;
+            col.update_notetype(&mut notetype, false)?;
+            Ok(())
+        })
+    }
+
     pub fn api_update_note(&self, note: anki_proto::notes::Note) -> Result<()> {
         self.with_col(|col| {
             let _ = NotesService::update_notes(

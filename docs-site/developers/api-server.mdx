@@ -25,7 +25,8 @@ the protocol envelope and the `version`, `sync`, `findCards`, `findNotes`,
 `storeMediaFile`, `retrieveMediaFile`,
 `getMediaFilesNames`, `deleteMediaFile`, `getMediaDirPath`,
 `createDeck`, `deleteDecks`, `deckNames`, `deckNamesAndIds`, `modelNames`,
-`modelNamesAndIds`, `suspend`, `unsuspend`, `suspended`, `areSuspended`, and
+`modelNamesAndIds`, `modelStyling`, `updateModelStyling`, `suspend`, `unsuspend`,
+`suspended`, `areSuspended`, and
 `getEaseFactors`, `setEaseFactors`, `cardsModTime`, `deckNameFromId`,
 `modelNameFromId`, `modelFieldNames`, `getDecks`, `changeDeck`, and `multi`.
 `apiReflect`, `guiBrowse`, and `guiEditNote` are also exposed with headless
@@ -73,6 +74,40 @@ Environment variables take precedence over the corresponding TOML setting:
 When `collection_path` is configured, the collection is opened automatically
 before the server starts. Paths beginning with `~/` are expanded using the
 current user's home directory.
+
+## Note-type styling
+
+Run the headless server tests with `just test-api-server`.
+
+Read CSS using the AnkiConnect `modelStyling` action:
+
+```json
+{
+  "action": "modelStyling",
+  "version": 6,
+  "params": {"modelName": "Lapis"}
+}
+```
+
+The result is `{"result":{"css":"..."}}`. Replace the complete CSS string
+with `updateModelStyling`:
+
+```json
+{
+  "action": "updateModelStyling",
+  "version": 6,
+  "params": {
+    "model": {"name": "Lapis", "css": ".card { text-align: center; }"}
+  }
+}
+```
+
+A successful update returns `{"result":null}`. An empty CSS string is allowed.
+The update affects all cards using that note type and preserves its fields,
+card templates, and other configuration. Anki marks the note type as modified
+for normal sync; a CSS-only edit does not require a full sync. Use `sync` or
+`POST /v1/sync` to sync manually, or let the configured sync timer run.
+`sync_after_add` only triggers sync after adding notes, not after styling edits.
 
 ## Automatic sync
 

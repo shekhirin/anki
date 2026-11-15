@@ -53,6 +53,10 @@ coverage html='':
 test-rust coverage='' html='':
     just {{ if coverage == "--coverage" { "_coverage-rust " + html } else { "_test-rust" } }}
 
+# Run the headless API server tests
+test-api-server:
+    cargo test --locked -p anki-api-server
+
 # Run Python tests (pylib + qt). Pass --coverage to enforce coverage, and --html to include HTML reports.
 [arg("coverage", long="coverage", value="--coverage")]
 [arg("html", long="html", value="--html")]

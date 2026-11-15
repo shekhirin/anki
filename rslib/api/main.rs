@@ -420,6 +420,8 @@ const ANKI_CONNECT_ACTIONS: &[&str] = &[
     "deckNameFromId",
     "modelNameFromId",
     "modelFieldNames",
+    "modelStyling",
+    "updateModelStyling",
     "modelNames",
     "modelNamesAndIds",
     "createDeck",
@@ -767,7 +769,10 @@ async fn sync(
     Json(request): Json<SyncRequest>,
 ) -> impl IntoResponse {
     let Some(controller) = &state.sync else {
-        return error_response(StatusCode::SERVICE_UNAVAILABLE, "sync is not configured".into());
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sync is not configured".into(),
+        );
     };
 
     let (mode, accepted) = match request.mode {
@@ -1452,6 +1457,42 @@ async fn execute_anki_connect_request(
                 .map_err(|error| error.to_string())?
                 .map_err(|error| error.to_string())?;
             Ok(serde_json::json!(model.name))
+        }
+        "modelStyling" => {
+            let model_name = request
+                .params
+                .get("modelName")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "modelName is required".to_string())?
+                .to_owned();
+            let backend = state.backend.clone();
+            let css = tokio::task::spawn_blocking(move || backend.api_notetype_styling(model_name))
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+            Ok(serde_json::json!({"css": css}))
+        }
+        "updateModelStyling" => {
+            let model = request
+                .params
+                .get("model")
+                .ok_or_else(|| "model is required".to_string())?;
+            let name = model
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "model.name is required".to_string())?
+                .to_owned();
+            let css = model
+                .get("css")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "model.css is required".to_string())?
+                .to_owned();
+            let backend = state.backend.clone();
+            tokio::task::spawn_blocking(move || backend.api_update_notetype_styling(name, css))
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+            Ok(serde_json::Value::Null)
         }
         "modelFieldNames" => {
             let model_name = request
@@ -2146,6 +2187,200 @@ fn error_response(status: StatusCode, message: String) -> axum::response::Respon
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn styling_request(
+        state: &Arc<AppState>,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        execute_anki_connect_request(
+            state.clone(),
+            serde_json::from_value(serde_json::json!({
+                "action": action, "version": 6, "params": params
+            }))
+            .unwrap(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn ankiconnect_styling_persists_and_preserves_notetype() {
+        let backend = init_backend(&BackendInit::default().encode_to_vec()).unwrap();
+        let tempdir = tempfile::tempdir().unwrap();
+        let open_request = OpenCollectionRequest {
+            collection_path: tempdir
+                .path()
+                .join("collection.anki2")
+                .to_string_lossy()
+                .into(),
+            media_folder_path: tempdir
+                .path()
+                .join("collection.media")
+                .to_string_lossy()
+                .into(),
+            media_db_path: tempdir
+                .path()
+                .join("collection.mdb")
+                .to_string_lossy()
+                .into(),
+        };
+        backend.open_collection(open_request.clone()).unwrap();
+        let state = Arc::new(AppState {
+            backend,
+            sync: None,
+            api_key: None,
+            metrics: MetricsState {
+                start_time: Instant::now(),
+                requests_total: Arc::new(AtomicU64::new(0)),
+                requests_failed: Arc::new(AtomicU64::new(0)),
+                request_duration_nanos: Arc::new(AtomicU64::new(0)),
+            },
+        });
+        let model_id = state
+            .backend
+            .api_notetype_id_by_name("Basic".into())
+            .unwrap();
+        let before = state.backend.api_notetype(model_id).unwrap();
+        let original = styling_request(
+            &state,
+            "modelStyling",
+            serde_json::json!({"modelName": "Basic"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            original,
+            serde_json::json!({"css": before.config.as_ref().unwrap().css})
+        );
+        let reflected = styling_request(
+            &state,
+            "apiReflect",
+            serde_json::json!({
+                "scopes": ["actions"], "actions": ["modelStyling", "updateModelStyling"]
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reflected["actions"],
+            serde_json::json!(["modelStyling", "updateModelStyling"])
+        );
+
+        let css = ".card { background: transparent; }\n/* 日本語 */";
+        assert_eq!(
+            styling_request(
+                &state,
+                "updateModelStyling",
+                serde_json::json!({
+                    "model": {"name": "Basic", "css": css}
+                })
+            )
+            .await
+            .unwrap(),
+            serde_json::Value::Null
+        );
+        let mut after = state.backend.api_notetype(model_id).unwrap();
+        assert_eq!(after.config.as_ref().unwrap().css, css);
+        assert_eq!(after.usn, -1);
+        assert!(after.mtime_secs > 0);
+        after.config.as_mut().unwrap().css = before.config.as_ref().unwrap().css.clone();
+        after.mtime_secs = before.mtime_secs;
+        after.usn = before.usn;
+        assert_eq!(after, before);
+
+        for (action, params) in [
+            ("modelStyling", serde_json::json!({})),
+            ("modelStyling", serde_json::json!({"modelName": 42})),
+            ("modelStyling", serde_json::json!({"modelName": "Missing"})),
+            ("updateModelStyling", serde_json::json!({})),
+            (
+                "updateModelStyling",
+                serde_json::json!({"model": {"css": ""}}),
+            ),
+            (
+                "updateModelStyling",
+                serde_json::json!({"model": {"name": "Basic"}}),
+            ),
+            (
+                "updateModelStyling",
+                serde_json::json!({"model": {"name": "Basic", "css": null}}),
+            ),
+            (
+                "updateModelStyling",
+                serde_json::json!({"model": {"name": "Missing", "css": ""}}),
+            ),
+        ] {
+            assert!(styling_request(&state, action, params).await.is_err());
+        }
+        assert_eq!(
+            styling_request(
+                &state,
+                "modelStyling",
+                serde_json::json!({"modelName": "Basic"})
+            )
+            .await
+            .unwrap(),
+            serde_json::json!({"css": css})
+        );
+        state
+            .backend
+            .close_collection(anki_proto::collection::CloseCollectionRequest {
+                downgrade_to_schema11: false,
+            })
+            .unwrap();
+        state.backend.open_collection(open_request).unwrap();
+        assert_eq!(
+            styling_request(
+                &state,
+                "modelStyling",
+                serde_json::json!({"modelName": "Basic"})
+            )
+            .await
+            .unwrap(),
+            serde_json::json!({"css": css})
+        );
+        styling_request(
+            &state,
+            "updateModelStyling",
+            serde_json::json!({
+                "model": {"name": "Basic", "css": ""}
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            styling_request(
+                &state,
+                "modelStyling",
+                serde_json::json!({"modelName": "Basic"})
+            )
+            .await
+            .unwrap(),
+            serde_json::json!({"css": ""})
+        );
+        state
+            .backend
+            .close_collection(anki_proto::collection::CloseCollectionRequest {
+                downgrade_to_schema11: false,
+            })
+            .unwrap();
+        assert!(styling_request(
+            &state,
+            "modelStyling",
+            serde_json::json!({"modelName": "Basic"})
+        )
+        .await
+        .is_err());
+        assert!(styling_request(
+            &state,
+            "updateModelStyling",
+            serde_json::json!({
+                "model": {"name": "Basic", "css": ""}
+            })
+        )
+        .await
+        .is_err());
+    }
 
     #[test]
     fn decodes_inline_media() {
