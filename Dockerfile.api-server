@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
-FROM lukemathwalker/cargo-chef:latest-rust-1.97.1 AS chef
+# Keep builder and runtime on Bookworm so their glibc ABI stays compatible.
+FROM lukemathwalker/cargo-chef:latest-rust-1.97.1-bookworm AS chef
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -40,7 +41,7 @@ RUN --mount=type=secret,id=actions_results_url,env=ACTIONS_RESULTS_URL \
     cargo build --locked --release -p anki-api-server \
     && cp target/release/anki-api-server /tmp/anki-api-server
 
-FROM debian:12.4-slim
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
