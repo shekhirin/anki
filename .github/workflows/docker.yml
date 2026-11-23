@@ -1,4 +1,4 @@
-name: Anki API Server Image
+name: Docker
 
 on:
   push:
@@ -14,7 +14,7 @@ on:
       - "ftl/**"
       - "Cargo.toml"
       - "Cargo.lock"
-      - ".github/workflows/api-server-image.yml"
+      - ".github/workflows/docker.yml"
   workflow_dispatch:
 
 concurrency:

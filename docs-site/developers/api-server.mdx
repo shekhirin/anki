@@ -223,7 +223,7 @@ scheduling semantics, recovery behavior, and verification commands.
 
 ## Container publishing
 
-The fork's `api-server-image.yml` workflow publishes
+The fork's `docker.yml` workflow publishes
 `ghcr.io/shekhirin/anki:main` on relevant pushes to `main`. A manual dispatch
 also requires selecting `main`; feature branches cannot publish the deployment
 tag. Each build additionally publishes `sha-<commit>` and records the source

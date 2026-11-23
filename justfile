@@ -229,8 +229,8 @@ rwkv-run *args:
     PYTHONPATH=python out/rwkv/venv/bin/python -m rwkv.job {{ args }}
 
 # Validate the main-branch container publishing workflow.
-check-api-image-workflow:
-    uv run --no-config --python 3.12 --isolated --no-project --with check-jsonschema check-jsonschema --builtin-schema vendor.github-workflows .github/workflows/api-server-image.yml
+check-docker-workflow:
+    uv run --no-config --python 3.12 --isolated --no-project --with check-jsonschema check-jsonschema --builtin-schema vendor.github-workflows .github/workflows/docker.yml
 
 # Run native Jiten sync tests.
 test-jiten:
