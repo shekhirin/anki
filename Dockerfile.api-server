@@ -58,25 +58,39 @@ RUN --mount=type=secret,id=actions_results_url,env=ACTIONS_RESULTS_URL \
     cargo build --locked --release -p anki-api-server \
     && cp target/release/anki-api-server /tmp/anki-api-server
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         libssl3 \
         libsqlite3-0 \
+        libgomp1 \
+        python3-venv \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 anki \
     && mkdir -p /config \
     && chown -R anki:anki /config
 
-COPY --from=build /tmp/anki-api-server /usr/local/bin/anki-api-server
+RUN python3 -m venv /opt/rwkv \
+    && /opt/rwkv/bin/pip install --no-cache-dir numpy==2.2.6 \
+    && /opt/rwkv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.10.0
+ADD --checksum=sha256:67ee8e9b0d0169733242c40646e0d2e5637845a25775762002ffc4e6396f9590 \
+    https://raw.githubusercontent.com/JSchoreels/anki/afa298cbe077b61fc42d214b2bf5898e300d3c98/qt/aqt/rwkv_inference/RWKV_trained_on_5000_10000.pth /opt/rwkv/model.pth
+# Remote ADD defaults to root-only permissions; the server runs as anki.
+RUN chmod 644 /opt/rwkv/model.pth
 
 USER anki
 WORKDIR /config
 ENV ANKI_API_HOST=0.0.0.0
 ENV ANKI_API_PORT=8765
+ENV ANKI_API_RWKV_PYTHON=/opt/rwkv/bin/python
+ENV ANKI_API_RWKV_MODEL=/opt/rwkv/model.pth
 
 VOLUME /config
 EXPOSE 8765
 
 ENTRYPOINT ["/usr/local/bin/anki-api-server"]
+
+FROM runtime AS final
+COPY --from=build /tmp/anki-api-server /usr/local/bin/anki-api-server
+COPY python/rwkv/job.py /opt/rwkv/job.py

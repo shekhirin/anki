@@ -59,6 +59,15 @@ jobs:
             actions_results_url=ACTIONS_RESULTS_URL
             actions_runtime_token=ACTIONS_RUNTIME_TOKEN
 
+      - name: Cache CPU inference runtime
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api-server
+          target: runtime
+          cache-from: type=gha,scope=anki-api-runtime
+          cache-to: type=gha,mode=min,scope=anki-api-runtime
+
       - name: Build runtime image
         uses: docker/build-push-action@v6
         with:
@@ -66,7 +75,9 @@ jobs:
           file: Dockerfile.api-server
           push: false
           load: true
-          cache-from: type=gha,scope=anki-api-deps
+          cache-from: |
+            type=gha,scope=anki-api-deps
+            type=gha,scope=anki-api-runtime
           secret-envs: |
             actions_results_url=ACTIONS_RESULTS_URL
             actions_runtime_token=ACTIONS_RUNTIME_TOKEN
@@ -92,14 +103,20 @@ jobs:
             --publish 127.0.0.1:18765:8765 \
             --env ANKI_API_COLLECTION_PATH=/tmp/smoke.anki2 \
             "$IMAGE:sha-$REVISION"
+          healthy=false
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:18765/health > "$RUNNER_TEMP/anki-health.json"; then
               python3 -c 'import json,sys; health=json.load(open(sys.argv[1])); assert health["status"] == "ok" and health["collection_open"] is True, health' "$RUNNER_TEMP/anki-health.json"
-              exit 0
+              healthy=true
+              break
             fi
             sleep 1
           done
-          exit 1
+          test "$healthy" = true
+          # An empty, temporary collection exercises model loading and the
+          # embedded worker without syncing or changing scheduling.
+          docker exec anki-api-smoke /opt/rwkv/bin/python /opt/rwkv/job.py \
+            --no-sync --wait-timeout 120
 
       - name: Publish verified main image
         env:

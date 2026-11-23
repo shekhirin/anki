@@ -231,9 +231,12 @@ revision in its OCI labels.
 
 The `box-infra` deployment follows `:main` through Keel's digest polling. For
 an initial migration from `:api-latest`, publish the new image before applying
-the changed deployment manifest. The image's Rust binary embeds the RWKV worker
-sources; running inference still requires a configured Python/PyTorch runtime
-and the pinned model, as described above.
+the changed deployment manifest. The image includes the pinned CPU PyTorch
+runtime and checksum-verified RWKV model under `/opt/rwkv`, with their server
+environment variables set. Worker sources are embedded in the Rust binary.
+The polling cron client is available as `/opt/rwkv/job.py`; invoke it using
+`/opt/rwkv/bin/python`. Runtime dependencies are cached separately from Rust
+dependencies, so source changes do not reinstall PyTorch.
 
 ## Scheduled Jiten vocabulary sync
 
