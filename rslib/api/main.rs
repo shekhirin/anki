@@ -1,6 +1,8 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+mod rwkv;
+
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
@@ -24,6 +26,7 @@ use axum::extract::Path;
 use axum::extract::Query;
 use axum::extract::Request;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
@@ -51,6 +54,8 @@ struct AppState {
     sync: Option<SyncController>,
     api_key: Option<String>,
     metrics: MetricsState,
+    gate: Arc<tokio::sync::RwLock<()>>,
+    rwkv: Option<rwkv::Controller>,
 }
 
 #[derive(Default, Deserialize)]
@@ -65,9 +70,12 @@ struct FileConfig {
     sync_interval_secs: Option<u64>,
     sync_after_add: Option<bool>,
     sync_media: Option<bool>,
+    rwkv_python: Option<String>,
+    rwkv_model: Option<String>,
+    rwkv_timeout_secs: Option<u64>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct Config {
     host: String,
     port: u16,
@@ -79,6 +87,9 @@ struct Config {
     sync_interval_secs: Option<u64>,
     sync_after_add: bool,
     sync_media: bool,
+    rwkv_python: Option<String>,
+    rwkv_model: Option<PathBuf>,
+    rwkv_timeout_secs: u64,
 }
 
 const DEFAULT_CONFIG: &str = r#"# Anki headless API server configuration.
@@ -98,6 +109,11 @@ port = 8765
 # sync_interval_secs = 300
 # sync_after_add = true
 sync_media = true
+
+# Optional nightly RWKV worker. Run just rwkv-setup and just rwkv-model first.
+# rwkv_python = "/absolute/path/to/anki/out/rwkv/venv/bin/python"
+# rwkv_model = "/absolute/path/to/anki/out/rwkv/model.pth"
+# rwkv_timeout_secs = 3600
 "#;
 
 impl Config {
@@ -149,6 +165,16 @@ impl Config {
                 file.sync_after_add.unwrap_or(false),
             ),
             sync_media: env_bool("ANKI_API_SYNC_MEDIA", file.sync_media.unwrap_or(true)),
+            rwkv_python: env_string("ANKI_API_RWKV_PYTHON").or(file.rwkv_python),
+            rwkv_model: env_string("ANKI_API_RWKV_MODEL")
+                .or(file.rwkv_model)
+                .map(expand_home_path),
+            rwkv_timeout_secs: match env_string("ANKI_API_RWKV_TIMEOUT_SECS") {
+                Some(value) => value
+                    .parse()
+                    .map_err(|_| "ANKI_API_RWKV_TIMEOUT_SECS must be an integer".to_string())?,
+                None => file.rwkv_timeout_secs.unwrap_or(3600),
+            },
         })
     }
 }
@@ -192,6 +218,7 @@ struct SyncController {
     after_add: bool,
     interval_secs: Option<u64>,
     runtime: Arc<SyncRuntimeState>,
+    gate: Arc<tokio::sync::RwLock<()>>,
 }
 
 struct SyncRuntimeState {
@@ -368,13 +395,13 @@ fn add_anki_connect_note(
         .map_err(|error| error.to_string())?;
 
     for media in input.audio {
-        append_anki_connect_media(&backend, &mut input.fields, media, false)?;
+        append_anki_connect_media(backend, &mut input.fields, media, false)?;
     }
     for media in input.video {
-        append_anki_connect_media(&backend, &mut input.fields, media, false)?;
+        append_anki_connect_media(backend, &mut input.fields, media, false)?;
     }
     for media in input.picture {
-        append_anki_connect_media(&backend, &mut input.fields, media, true)?;
+        append_anki_connect_media(backend, &mut input.fields, media, true)?;
     }
 
     let fields = notetype
@@ -524,12 +551,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })?;
     }
 
+    let gate = Arc::new(tokio::sync::RwLock::new(()));
+
     // Sync login uses the backend's synchronous wrapper around an async
     // operation. Run it outside Tokio's runtime to avoid nested block_on().
     let sync = tokio::task::spawn_blocking({
         let backend = backend.clone();
         let config = config.clone();
-        move || SyncController::from_config(&backend, &config)
+        let gate = gate.clone();
+        move || SyncController::from_config(&backend, &config, gate)
     })
     .await
     .map_err(std::io::Error::other)?
@@ -546,7 +576,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         requests_failed: Arc::new(AtomicU64::new(0)),
         request_duration_nanos: Arc::new(AtomicU64::new(0)),
     };
+    let rwkv = rwkv::Controller::from_config(&backend, sync.clone(), gate.clone(), &config)
+        .map_err(std::io::Error::other)?;
     let state = Arc::new(AppState {
+        gate,
+        rwkv,
         backend,
         sync,
         api_key: config.api_key,
@@ -563,12 +597,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn build_app(state: Arc<AppState>) -> Router {
     let request_metrics = state.metrics.clone();
+    let operation_gate = state.gate.clone();
     Router::new()
         .route("/health", get(health))
         .route("/", post(ankiconnect))
         .route("/v1/sync", post(sync))
         .route("/v1/sync/status", get(sync_status))
         .route("/v1/metrics", get(metrics_endpoint))
+        .route("/v1/rwkv/snapshot", post(rwkv_snapshot))
+        .route("/v1/rwkv/run", post(rwkv::run))
+        .route("/v1/rwkv/jobs/{job_id}", get(rwkv::status))
         .route("/v1/collection/open", post(open_collection))
         .route("/v1/collection/close", post(close_collection))
         .route("/v1/decks", get(get_decks))
@@ -581,7 +619,18 @@ fn build_app(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn(
             move |request: Request, next: Next| {
                 let metrics = request_metrics.clone();
+                let gate = operation_gate.clone();
                 async move {
+                    // The worker owns the exclusive gate over sync, replay,
+                    // apply and upload. Status and admission remain available.
+                    let bypass = request.uri().path() == "/health"
+                        || request.uri().path() == "/v1/rwkv/run"
+                        || request.uri().path().starts_with("/v1/rwkv/jobs/");
+                    let _permit = if bypass {
+                        None
+                    } else {
+                        Some(gate.read_owned().await)
+                    };
                     let started = Instant::now();
                     let response = next.run(request).await;
                     let status = response.status();
@@ -600,7 +649,11 @@ fn build_app(state: Arc<AppState>) -> Router {
 }
 
 impl SyncController {
-    fn from_config(backend: &Backend, config: &Config) -> Result<Option<Self>, String> {
+    fn from_config(
+        backend: &Backend,
+        config: &Config,
+        gate: Arc<tokio::sync::RwLock<()>>,
+    ) -> Result<Option<Self>, String> {
         let username = config.sync_username.clone();
         let password = config.sync_password.clone();
         let after_add = config.sync_after_add;
@@ -612,15 +665,15 @@ impl SyncController {
             }
         }
 
-        if !after_add && interval_secs.is_none() {
+        if !after_add && interval_secs.is_none() && username.is_none() && password.is_none() {
             return Ok(None);
         }
 
         let username = username.ok_or_else(|| {
-            "ANKI_API_SYNC_USERNAME is required when auto-sync is enabled".to_string()
+            "ANKI_API_SYNC_USERNAME is required when sync is configured".to_string()
         })?;
         let password = password.ok_or_else(|| {
-            "ANKI_API_SYNC_PASSWORD is required when auto-sync is enabled".to_string()
+            "ANKI_API_SYNC_PASSWORD is required when sync is configured".to_string()
         })?;
         let endpoint = config.sync_endpoint.clone();
         let auth = backend
@@ -628,6 +681,7 @@ impl SyncController {
             .map_err(|error| format!("sync login failed: {error}"))?;
 
         Ok(Some(Self {
+            gate,
             backend: backend.clone(),
             auth: Arc::new(Mutex::new(auth)),
             sync_media: config.sync_media,
@@ -658,31 +712,38 @@ impl SyncController {
         }
 
         let controller = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let result = match operation {
-                SyncOperation::Normal => {
-                    let result = controller
-                        .backend
-                        .api_sync_collection(controller.current_auth(), controller.sync_media);
-                    if let Ok(response) = &result {
-                        controller.update_endpoint(response.new_endpoint.clone());
-                    }
-                    result
-                        .map(|response| format!("completed (required={})", response.required))
-                        .map_err(|error| format!("{error:?}"))
-                }
-                SyncOperation::Full { upload } => controller
-                    .backend
-                    .api_full_upload_or_download(controller.current_auth(), upload, None)
-                    .map(|_| {
-                        if upload {
-                            "completed (full_upload)".to_string()
-                        } else {
-                            "completed (full_download)".to_string()
+        tokio::spawn(async move {
+            let _permit = controller.gate.clone().read_owned().await;
+            let worker = controller.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let controller = worker;
+                match operation {
+                    SyncOperation::Normal => {
+                        let result = controller
+                            .backend
+                            .api_sync_collection(controller.current_auth(), controller.sync_media);
+                        if let Ok(response) = &result {
+                            controller.update_endpoint(response.new_endpoint.clone());
                         }
-                    })
-                    .map_err(|error| format!("{error:?}")),
-            };
+                        result
+                            .map(|response| format!("completed (required={})", response.required))
+                            .map_err(|error| format!("{error:?}"))
+                    }
+                    SyncOperation::Full { upload } => controller
+                        .backend
+                        .api_full_upload_or_download(controller.current_auth(), upload, None)
+                        .map(|_| {
+                            if upload {
+                                "completed (full_upload)".to_string()
+                            } else {
+                                "completed (full_download)".to_string()
+                            }
+                        })
+                        .map_err(|error| format!("{error:?}")),
+                }
+            })
+            .await
+            .unwrap_or_else(|error| Err(format!("sync task failed: {error}")));
             controller.runtime.total.fetch_add(1, Ordering::Relaxed);
             if result.is_err() {
                 controller.runtime.failures.fetch_add(1, Ordering::Relaxed);
@@ -767,7 +828,10 @@ async fn sync(
     Json(request): Json<SyncRequest>,
 ) -> impl IntoResponse {
     let Some(controller) = &state.sync else {
-        return error_response(StatusCode::SERVICE_UNAVAILABLE, "sync is not configured".into());
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sync is not configured".into(),
+        );
     };
 
     let (mode, accepted) = match request.mode {
@@ -2236,6 +2300,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rwkv_snapshot_requires_bearer_key() {
+        let state = Arc::new(AppState {
+            gate: Arc::new(tokio::sync::RwLock::new(())),
+            rwkv: None,
+            backend: init_backend(&BackendInit::default().encode_to_vec()).unwrap(),
+            sync: None,
+            api_key: Some("snapshot-test-key".into()),
+            metrics: MetricsState {
+                start_time: Instant::now(),
+                requests_total: Arc::new(AtomicU64::new(0)),
+                requests_failed: Arc::new(AtomicU64::new(0)),
+                request_duration_nanos: Arc::new(AtomicU64::new(0)),
+            },
+        });
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("http://{}/v1/rwkv/snapshot", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_app(state)).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let unauthorized = client
+            .post(&url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let tempdir = tempfile::tempdir().unwrap();
+        let open_url = url.replace("/rwkv/snapshot", "/collection/open");
+        let opened = client
+            .post(open_url)
+            .json(&serde_json::json!({
+                "collection_path": tempdir.path().join("collection.anki2")
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(opened.status().is_success());
+        let authorized = client
+            .post(&url)
+            .bearer_auth("snapshot-test-key")
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(authorized.status(), StatusCode::OK);
+        let snapshot: serde_json::Value = authorized.json().await.unwrap();
+        assert_eq!(snapshot["version"], 1);
+        assert_eq!(snapshot["history"], serde_json::json!([]));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn ankiconnect_add_note_with_media_over_http() {
         let backend = init_backend(
             &BackendInit {
@@ -2253,6 +2370,8 @@ mod tests {
             request_duration_nanos: Arc::new(AtomicU64::new(0)),
         };
         let state = Arc::new(AppState {
+            gate: Arc::new(tokio::sync::RwLock::new(())),
+            rwkv: None,
             backend,
             sync: None,
             api_key: None,
@@ -2458,4 +2577,27 @@ async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoRespon
         [("content-type", "text/plain; charset=utf-8")],
         metrics,
     )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RwkvSnapshotRequest {
+    #[serde(default)]
+    query: String,
+}
+
+async fn rwkv_snapshot(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<RwkvSnapshotRequest>,
+) -> axum::response::Response {
+    if !rwkv::authenticated(&state, &headers) {
+        return error_response(StatusCode::UNAUTHORIZED, "invalid API key".into());
+    }
+    let backend = state.backend.clone();
+    match tokio::task::spawn_blocking(move || backend.api_rwkv_snapshot(request.query)).await {
+        Ok(Ok(snapshot)) => Json(snapshot).into_response(),
+        Ok(Err(error)) => error_response(StatusCode::BAD_REQUEST, error.to_string()),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }

@@ -186,3 +186,44 @@ playwright_env := if os() == "windows" { "set PLAYWRIGHT_BROWSERS_PATH=out\\play
 yarn := if os() == "windows" { "out\\extracted\\node\\yarn.cmd" } else { "out/extracted/node/bin/yarn" }
 uv := env("UV_BINARY", if os() == "windows" { "out\\extracted\\uv\\uv" } else { "out/extracted/uv/uv" })
 export UV_PROJECT_ENVIRONMENT := if os() == "windows" { "out\\pyenv" } else { "out/pyenv" }
+
+# Install the build runner used by the project.
+bootstrap-n2:
+    bash tools/install-n2
+
+# Build and start the headless API server.
+api-server:
+    {{ ninja }} rslib:proto
+    cargo run -p anki-api-server
+
+# Download the pinned AGPL reference model and verify its checksum.
+rwkv-model:
+    PYTHONPATH=python uv run --no-config --python 3.12 --isolated --no-project python -m rwkv.preview --download-model out/rwkv/model.pth
+
+# Preview RWKV-Curve scheduling; never writes to the collection.
+rwkv-preview model='out/rwkv/model.pth' *args:
+    PYTHONPATH=python uv run --no-config --python 3.12 --isolated --no-project --with torch==2.10.0 python -m rwkv.preview --model '{{ model }}' {{ args }}
+
+# Check the RWKV snapshot and model preview, including real inference.
+test-rwkv: rwkv-model rwkv-setup
+    {{ ninja }} rslib:proto
+    ANKI_RWKV_TEST_PYTHON="{{ justfile_directory() }}/out/rwkv/venv/bin/python" cargo test -p anki -p anki-api-server rwkv -- --include-ignored
+    just _test-rwkv-python
+
+[private]
+_test-rwkv-python:
+    PYTHONPATH=python uv run --no-config --python 3.12 --isolated --no-project --with torch==2.10.0 --with numpy==2.2.6 --with pytest python -m pytest python/rwkv/tests
+
+[private]
+_fmt-rwkv:
+    uv run --no-config --python 3.12 --isolated --no-project --with ruff ruff format python/rwkv
+    uv run --no-config --python 3.12 --isolated --no-project --with ruff ruff check --fix python/rwkv
+
+# Install the optional Python runtime used by server-side RWKV jobs.
+rwkv-setup:
+    uv venv --no-config --allow-existing --python 3.12 out/rwkv/venv
+    uv pip install --no-config --python out/rwkv/venv/bin/python torch==2.10.0 numpy==2.2.6
+
+# Run a coordinated RWKV job and wait; add --apply to update scheduling.
+rwkv-run *args:
+    PYTHONPATH=python out/rwkv/venv/bin/python -m rwkv.job {{ args }}

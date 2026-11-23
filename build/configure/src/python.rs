@@ -180,6 +180,7 @@ impl BuildAction for BuildWheel {
 
 pub fn check_python(build: &mut Build) -> Result<()> {
     python_format(build, "tools", inputs![glob!("tools/**/*.py")])?;
+    python_format(build, "rwkv", inputs![glob!("python/rwkv/**/*.py")])?;
     build.add_action(
         "check:pytest:tools",
         PythonTest {

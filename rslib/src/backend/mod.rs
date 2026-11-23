@@ -16,6 +16,7 @@ mod i18n;
 mod import_export;
 mod media;
 mod ops;
+mod rwkv;
 mod sync;
 
 use std::ops::Deref;

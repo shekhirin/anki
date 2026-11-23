@@ -130,7 +130,6 @@ The endpoint reports uptime, collection state, HTTP request totals/errors and
 duration, plus sync attempts, failures, in-progress state, and the timestamp
 of the last successful sync.
 
-
 ## Endpoints
 
 Check the server:
@@ -177,3 +176,47 @@ accepts either numeric `deck_id`/`notetype_id` values or the more convenient
 
 The server is intended to grow around stable JSON endpoints rather than expose
 the generated internal protobuf method indices directly.
+
+## Nightly RWKV-Curve scheduling
+
+The headless server can run a coordinated RWKV-Curve scheduling job while phone
+apps continue using their supported scheduler. Install the optional runtime and
+pinned AGPL reference model:
+
+```bash
+just rwkv-model
+just rwkv-setup
+```
+
+Configure `rwkv_python` and `rwkv_model` in `~/.anki/server.toml` with absolute
+paths to `out/rwkv/venv/bin/python` and `out/rwkv/model.pth`, then restart the
+server. `rwkv_timeout_secs` defaults to 3600 and bounds inference. Environment
+overrides are `ANKI_API_RWKV_PYTHON`, `ANKI_API_RWKV_MODEL`, and
+`ANKI_API_RWKV_TIMEOUT_SECS`.
+
+```bash
+just rwkv-run --output out/rwkv/preview-job.json
+just rwkv-run --apply --output out/rwkv/nightly-job.json
+```
+
+The first command previews; `--apply` updates cards. Jobs sync before replay,
+pull again to detect phone reviews uploaded during inference, validate the
+snapshot, commit one native transaction, and sync the result. Configure sync
+credentials; a sync timer is optional. `--no-sync` explicitly enables local-only
+operation. Set `ANKI_API_KEY` in the client environment when authentication is
+enabled. The client can be called from cron and exits nonzero on failure.
+
+`POST /v1/rwkv/run` returns HTTP 202 with a `job_id`. Parameters are `query`,
+`apply`, `sync`, `retention`, and `maximum_interval`. Poll
+`GET /v1/rwkv/jobs/{job_id}` for state, phase, applied count, report, and error.
+These routes and `POST /v1/rwkv/snapshot` check Bearer authentication when an API
+key is configured. Only one job runs at a time; collection requests and timer
+syncs wait while it runs.
+
+If the final upload fails, the job reports failure and retains the count of
+locally applied changes. Full-sync decisions are never made automatically.
+The most recent 20 job records are retained in memory and are lost on restart.
+
+The read-only `just rwkv-preview` command remains available for saved/offline
+snapshots. See `python/rwkv/README.md` for the cron example, model provenance,
+scheduling semantics, recovery behavior, and verification commands.
