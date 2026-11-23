@@ -186,3 +186,8 @@ playwright_env := if os() == "windows" { "set PLAYWRIGHT_BROWSERS_PATH=out\\play
 yarn := if os() == "windows" { "out\\extracted\\node\\yarn.cmd" } else { "out/extracted/node/bin/yarn" }
 uv := env("UV_BINARY", if os() == "windows" { "out\\extracted\\uv\\uv" } else { "out/extracted/uv/uv" })
 export UV_PROJECT_ENVIRONMENT := if os() == "windows" { "out\\pyenv" } else { "out/pyenv" }
+
+# Run native Jiten sync tests.
+test-jiten:
+    {{ ninja }} rslib:proto
+    cargo test -p anki -p anki-api-server jiten

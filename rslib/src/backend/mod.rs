@@ -14,6 +14,7 @@ mod error;
 mod github;
 mod i18n;
 mod import_export;
+pub mod jiten;
 mod media;
 mod ops;
 mod sync;

@@ -4,8 +4,8 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
 publish = false
+rust-version.workspace = true
 description = "Headless HTTP API server for Anki collections"
 
 [[bin]]
@@ -23,7 +23,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-toml.workspace = true
 tokio.workspace = true
+toml.workspace = true
 tower-http = { workspace = true, features = ["trace"] }
 tracing.workspace = true

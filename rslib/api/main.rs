@@ -1,6 +1,8 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+mod jiten;
+
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
@@ -51,6 +53,7 @@ struct AppState {
     sync: Option<SyncController>,
     api_key: Option<String>,
     metrics: MetricsState,
+    jiten: Option<jiten::Controller>,
 }
 
 #[derive(Default, Deserialize)]
@@ -65,6 +68,7 @@ struct FileConfig {
     sync_interval_secs: Option<u64>,
     sync_after_add: Option<bool>,
     sync_media: Option<bool>,
+    jiten: Option<jiten::Settings>,
 }
 
 #[derive(Clone)]
@@ -79,6 +83,7 @@ struct Config {
     sync_interval_secs: Option<u64>,
     sync_after_add: bool,
     sync_media: bool,
+    jiten: jiten::Settings,
 }
 
 const DEFAULT_CONFIG: &str = r#"# Anki headless API server configuration.
@@ -98,6 +103,17 @@ port = 8765
 # sync_interval_secs = 300
 # sync_after_add = true
 sync_media = true
+
+# Optional vocabulary export to Jiten; set ANKI_API_JITEN_API_KEY separately.
+# [jiten]
+# enabled = true
+# auto_sync = false # Preview manually first; set true for scheduled uploads.
+# interval_secs = 3600
+# sync_ankiweb_first = true
+# [[jiten.mappings]]
+# query = 'deck:Japanese note:Lapis'
+# word_field = "Expression"
+# reading_field = "Reading"
 "#;
 
 impl Config {
@@ -136,6 +152,7 @@ impl Config {
             .map(expand_home_path);
 
         Ok(Self {
+            jiten: file.jiten.unwrap_or_default(),
             host,
             port,
             api_key: env_string("ANKI_API_KEY").or(file.api_key),
@@ -368,13 +385,13 @@ fn add_anki_connect_note(
         .map_err(|error| error.to_string())?;
 
     for media in input.audio {
-        append_anki_connect_media(&backend, &mut input.fields, media, false)?;
+        append_anki_connect_media(backend, &mut input.fields, media, false)?;
     }
     for media in input.video {
-        append_anki_connect_media(&backend, &mut input.fields, media, false)?;
+        append_anki_connect_media(backend, &mut input.fields, media, false)?;
     }
     for media in input.picture {
-        append_anki_connect_media(&backend, &mut input.fields, media, true)?;
+        append_anki_connect_media(backend, &mut input.fields, media, true)?;
     }
 
     let fields = notetype
@@ -546,7 +563,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         requests_failed: Arc::new(AtomicU64::new(0)),
         request_duration_nanos: Arc::new(AtomicU64::new(0)),
     };
+    let jiten = jiten::Controller::new(backend.clone(), sync.clone(), config.jiten)
+        .map_err(std::io::Error::other)?;
+    if let Some(controller) = &jiten {
+        controller.start_timer();
+    }
     let state = Arc::new(AppState {
+        jiten,
         backend,
         sync,
         api_key: config.api_key,
@@ -568,6 +591,8 @@ fn build_app(state: Arc<AppState>) -> Router {
         .route("/", post(ankiconnect))
         .route("/v1/sync", post(sync))
         .route("/v1/sync/status", get(sync_status))
+        .route("/v1/jiten/sync", post(jiten::run))
+        .route("/v1/jiten/status", get(jiten::status))
         .route("/v1/metrics", get(metrics_endpoint))
         .route("/v1/collection/open", post(open_collection))
         .route("/v1/collection/close", post(close_collection))
@@ -612,7 +637,7 @@ impl SyncController {
             }
         }
 
-        if !after_add && interval_secs.is_none() {
+        if !after_add && interval_secs.is_none() && username.is_none() && password.is_none() {
             return Ok(None);
         }
 
@@ -767,7 +792,10 @@ async fn sync(
     Json(request): Json<SyncRequest>,
 ) -> impl IntoResponse {
     let Some(controller) = &state.sync else {
-        return error_response(StatusCode::SERVICE_UNAVAILABLE, "sync is not configured".into());
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sync is not configured".into(),
+        );
     };
 
     let (mode, accepted) = match request.mode {
@@ -2143,6 +2171,87 @@ fn error_response(status: StatusCode, message: String) -> axum::response::Respon
     (status, Json(ErrorResponse { error: message })).into_response()
 }
 
+async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut metrics = String::new();
+
+    let collection_open = state.backend.collection_is_open();
+
+    metrics.push_str("# HELP anki_api_uptime_seconds Server uptime in seconds\n");
+    metrics.push_str("# TYPE anki_api_uptime_seconds counter\n");
+    metrics.push_str(&format!(
+        "anki_api_uptime_seconds {}\n",
+        state.metrics.start_time.elapsed().as_secs_f64()
+    ));
+
+    metrics.push_str("# HELP anki_http_requests_total Total HTTP requests handled\n");
+    metrics.push_str("# TYPE anki_http_requests_total counter\n");
+    metrics.push_str(&format!(
+        "anki_http_requests_total {}\n",
+        state.metrics.requests_total.load(Ordering::Relaxed)
+    ));
+
+    metrics.push_str("# HELP anki_http_requests_failed_total HTTP requests returning 4xx or 5xx\n");
+    metrics.push_str("# TYPE anki_http_requests_failed_total counter\n");
+    metrics.push_str(&format!(
+        "anki_http_requests_failed_total {}\n",
+        state.metrics.requests_failed.load(Ordering::Relaxed)
+    ));
+
+    metrics.push_str("# HELP anki_http_request_duration_seconds_sum Total HTTP request time\n");
+    metrics.push_str("# TYPE anki_http_request_duration_seconds_sum counter\n");
+    metrics.push_str(&format!(
+        "anki_http_request_duration_seconds_sum {}\n",
+        state.metrics.request_duration_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
+    ));
+
+    metrics.push_str("# HELP anki_http_request_duration_seconds_count Total HTTP requests timed\n");
+    metrics.push_str("# TYPE anki_http_request_duration_seconds_count counter\n");
+    metrics.push_str(&format!(
+        "anki_http_request_duration_seconds_count {}\n",
+        state.metrics.requests_total.load(Ordering::Relaxed)
+    ));
+
+    metrics.push_str("# HELP anki_collection_open Whether a collection is currently open\n");
+    metrics.push_str("# TYPE anki_collection_open gauge\n");
+    metrics.push_str(&format!(
+        "anki_collection_open {}\n",
+        if collection_open { 1 } else { 0 }
+    ));
+
+    if let Some(sync) = &state.sync {
+        metrics.push_str("# HELP anki_sync_in_progress Whether a sync is currently running\n");
+        metrics.push_str("# TYPE anki_sync_in_progress gauge\n");
+        metrics.push_str(&format!(
+            "anki_sync_in_progress {}\n",
+            sync.runtime.in_progress.load(Ordering::Relaxed) as u8
+        ));
+        metrics.push_str("# HELP anki_sync_total Completed sync attempts\n");
+        metrics.push_str("# TYPE anki_sync_total counter\n");
+        metrics.push_str(&format!(
+            "anki_sync_total {}\n",
+            sync.runtime.total.load(Ordering::Relaxed)
+        ));
+        metrics.push_str("# HELP anki_sync_failures_total Failed sync attempts\n");
+        metrics.push_str("# TYPE anki_sync_failures_total counter\n");
+        metrics.push_str(&format!(
+            "anki_sync_failures_total {}\n",
+            sync.runtime.failures.load(Ordering::Relaxed)
+        ));
+        metrics.push_str("# HELP anki_sync_last_success Unix timestamp of last successful sync\n");
+        metrics.push_str("# TYPE anki_sync_last_success gauge\n");
+        metrics.push_str(&format!(
+            "anki_sync_last_success {}\n",
+            sync.runtime.last_success.load(Ordering::Relaxed)
+        ));
+    }
+
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; charset=utf-8")],
+        metrics,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2256,6 +2365,7 @@ mod tests {
             backend,
             sync: None,
             api_key: None,
+            jiten: None,
             metrics,
         });
         let app = build_app(state);
@@ -2377,85 +2487,4 @@ mod tests {
 
         server.abort();
     }
-}
-
-async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let mut metrics = String::new();
-
-    let collection_open = state.backend.collection_is_open();
-
-    metrics.push_str("# HELP anki_api_uptime_seconds Server uptime in seconds\n");
-    metrics.push_str("# TYPE anki_api_uptime_seconds counter\n");
-    metrics.push_str(&format!(
-        "anki_api_uptime_seconds {}\n",
-        state.metrics.start_time.elapsed().as_secs_f64()
-    ));
-
-    metrics.push_str("# HELP anki_http_requests_total Total HTTP requests handled\n");
-    metrics.push_str("# TYPE anki_http_requests_total counter\n");
-    metrics.push_str(&format!(
-        "anki_http_requests_total {}\n",
-        state.metrics.requests_total.load(Ordering::Relaxed)
-    ));
-
-    metrics.push_str("# HELP anki_http_requests_failed_total HTTP requests returning 4xx or 5xx\n");
-    metrics.push_str("# TYPE anki_http_requests_failed_total counter\n");
-    metrics.push_str(&format!(
-        "anki_http_requests_failed_total {}\n",
-        state.metrics.requests_failed.load(Ordering::Relaxed)
-    ));
-
-    metrics.push_str("# HELP anki_http_request_duration_seconds_sum Total HTTP request time\n");
-    metrics.push_str("# TYPE anki_http_request_duration_seconds_sum counter\n");
-    metrics.push_str(&format!(
-        "anki_http_request_duration_seconds_sum {}\n",
-        state.metrics.request_duration_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
-    ));
-
-    metrics.push_str("# HELP anki_http_request_duration_seconds_count Total HTTP requests timed\n");
-    metrics.push_str("# TYPE anki_http_request_duration_seconds_count counter\n");
-    metrics.push_str(&format!(
-        "anki_http_request_duration_seconds_count {}\n",
-        state.metrics.requests_total.load(Ordering::Relaxed)
-    ));
-
-    metrics.push_str("# HELP anki_collection_open Whether a collection is currently open\n");
-    metrics.push_str("# TYPE anki_collection_open gauge\n");
-    metrics.push_str(&format!(
-        "anki_collection_open {}\n",
-        if collection_open { 1 } else { 0 }
-    ));
-
-    if let Some(sync) = &state.sync {
-        metrics.push_str("# HELP anki_sync_in_progress Whether a sync is currently running\n");
-        metrics.push_str("# TYPE anki_sync_in_progress gauge\n");
-        metrics.push_str(&format!(
-            "anki_sync_in_progress {}\n",
-            sync.runtime.in_progress.load(Ordering::Relaxed) as u8
-        ));
-        metrics.push_str("# HELP anki_sync_total Completed sync attempts\n");
-        metrics.push_str("# TYPE anki_sync_total counter\n");
-        metrics.push_str(&format!(
-            "anki_sync_total {}\n",
-            sync.runtime.total.load(Ordering::Relaxed)
-        ));
-        metrics.push_str("# HELP anki_sync_failures_total Failed sync attempts\n");
-        metrics.push_str("# TYPE anki_sync_failures_total counter\n");
-        metrics.push_str(&format!(
-            "anki_sync_failures_total {}\n",
-            sync.runtime.failures.load(Ordering::Relaxed)
-        ));
-        metrics.push_str("# HELP anki_sync_last_success Unix timestamp of last successful sync\n");
-        metrics.push_str("# TYPE anki_sync_last_success gauge\n");
-        metrics.push_str(&format!(
-            "anki_sync_last_success {}\n",
-            sync.runtime.last_success.load(Ordering::Relaxed)
-        ));
-    }
-
-    (
-        StatusCode::OK,
-        [("content-type", "text/plain; charset=utf-8")],
-        metrics,
-    )
 }
