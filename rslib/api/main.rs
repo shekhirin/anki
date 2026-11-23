@@ -822,7 +822,7 @@ async fn handle_anki_connect_request(
 
     match result {
         Ok(result) if legacy_version => result,
-        Ok(result) => serde_json::json!({"result": result}),
+        Ok(result) => serde_json::json!({"result": result, "error": null}),
         Err(error) => serde_json::json!({"result": null, "error": error}),
     }
 }
@@ -2297,7 +2297,7 @@ mod tests {
             .json()
             .await
             .unwrap();
-        assert_eq!(response, serde_json::json!({"result": 6}));
+        assert_eq!(response, serde_json::json!({"result": 6, "error": null}));
 
         let response = client
             .post(format!("{base_url}/v1/collection/open"))
@@ -2335,7 +2335,10 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let response: serde_json::Value = response.json().await.unwrap();
-        assert!(!response.as_object().unwrap().contains_key("error"));
+        assert_eq!(
+            response.as_object().unwrap().get("error"),
+            Some(&serde_json::Value::Null)
+        );
         let note_id = response["result"].as_i64().unwrap();
 
         let response: serde_json::Value = client
