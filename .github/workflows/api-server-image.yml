@@ -66,6 +66,7 @@ jobs:
           file: Dockerfile.api-server
           push: false
           load: true
+          cache-from: type=gha,scope=anki-api-deps
           secret-envs: |
             actions_results_url=ACTIONS_RESULTS_URL
             actions_runtime_token=ACTIONS_RUNTIME_TOKEN
