@@ -1,5 +1,20 @@
 # syntax=docker/dockerfile:1
 
+# Use the verified upstream binary instead of spending several minutes compiling
+# the compiler cache on every cold build. Keep download tooling out of chef.
+FROM debian:bookworm-slim AS sccache
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN case "$TARGETARCH" in \
+        amd64) triple=x86_64-unknown-linux-musl; checksum=0f57d80d0036967bc06b8391dcf4b527a6837187de454b55222ce4e0d5e19d0a ;; \
+        arm64) triple=aarch64-unknown-linux-musl; checksum=1bbbd570aa957db85c1e7c3fbc790f7766d4406347371b884515ed723ac03086 ;; \
+        *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && curl --fail --location --retry 3 "https://github.com/mozilla/sccache/releases/download/v0.13.0/sccache-v0.13.0-$triple.tar.gz" -o /tmp/sccache.tar.gz \
+    && echo "$checksum  /tmp/sccache.tar.gz" | sha256sum --check \
+    && tar -xzf /tmp/sccache.tar.gz --strip-components=1 -C /usr/local/bin "sccache-v0.13.0-$triple/sccache"
+
 # Keep builder and runtime on Bookworm so their glibc ABI stays compatible.
 FROM lukemathwalker/cargo-chef:latest-rust-1.97.1-bookworm AS chef
 
@@ -12,7 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PROTOC=/usr/bin/protoc
-RUN cargo install sccache --locked --version 0.13.0
+COPY --from=sccache /usr/local/bin/sccache /usr/local/cargo/bin/sccache
 ENV RUSTC_WRAPPER=/usr/local/cargo/bin/sccache
 ENV SCCACHE_GHA_ENABLED=true
 
@@ -23,14 +38,16 @@ FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-FROM chef AS build
+FROM chef AS deps
 
 COPY --from=planner /build/anki/recipe.json recipe.json
 RUN --mount=type=secret,id=actions_results_url,env=ACTIONS_RESULTS_URL \
     --mount=type=secret,id=actions_runtime_token,env=ACTIONS_RUNTIME_TOKEN \
     --mount=type=cache,id=anki-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=anki-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    cargo chef cook --locked --release --recipe-path recipe.json
+    cargo chef cook --locked --release --package anki-api-server --recipe-path recipe.json
+
+FROM deps AS build
 
 COPY . .
 RUN command -v protoc && protoc --version

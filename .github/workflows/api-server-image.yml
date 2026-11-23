@@ -45,14 +45,27 @@ jobs:
       - name: Expose GitHub Actions runtime
         uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 #v4
 
-      - uses: docker/build-push-action@v6
+      # Export only reusable dependencies. Application source changes otherwise
+      # upload a large target directory that the next source change invalidates.
+      - name: Cache API dependencies
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api-server
+          target: deps
+          cache-from: type=gha,scope=anki-api-deps
+          cache-to: type=gha,mode=max,scope=anki-api-deps
+          secret-envs: |
+            actions_results_url=ACTIONS_RESULTS_URL
+            actions_runtime_token=ACTIONS_RUNTIME_TOKEN
+
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.api-server
           push: false
           load: true
-          cache-from: type=gha,scope=anki-api-server
-          cache-to: type=gha,mode=max,scope=anki-api-server
           secret-envs: |
             actions_results_url=ACTIONS_RESULTS_URL
             actions_runtime_token=ACTIONS_RUNTIME_TOKEN
