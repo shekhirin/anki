@@ -2,10 +2,14 @@ name: Anki API Server Image
 
 on:
   push:
-    branches: [alexey/anki-api-server]
+    branches: [main]
     paths:
       - "Dockerfile.api-server"
       - "rslib/**"
+      - "python/rwkv/**"
+      - ".dockerignore"
+      - "rust-toolchain.toml"
+      - ".cargo/config.toml"
       - "proto/**"
       - "ftl/**"
       - "Cargo.toml"
@@ -19,6 +23,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -50,6 +55,9 @@ jobs:
           secret-envs: |
             actions_results_url=ACTIONS_RESULTS_URL
             actions_runtime_token=ACTIONS_RUNTIME_TOKEN
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
           tags: |
-            ghcr.io/${{ github.repository }}:api-${{ github.sha }}
-            ghcr.io/${{ github.repository }}:api-latest
+            ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+            ghcr.io/${{ github.repository }}:main
