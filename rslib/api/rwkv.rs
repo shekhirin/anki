@@ -580,6 +580,7 @@ mod tests {
             sync: None,
             gate: gate.clone(),
             rwkv: Some(worker),
+            jiten: None,
             api_key: Some("test-key".into()),
             metrics: MetricsState {
                 start_time: Instant::now(),

@@ -1,6 +1,7 @@
 // Copyright: Ankitects Pty Ltd and contributors
 // License: GNU AGPL, version 3 or later; http://www.gnu.org/licenses/agpl.html
 
+mod jiten;
 mod rwkv;
 
 use std::fs;
@@ -56,6 +57,7 @@ struct AppState {
     metrics: MetricsState,
     gate: Arc<tokio::sync::RwLock<()>>,
     rwkv: Option<rwkv::Controller>,
+    jiten: Option<jiten::Controller>,
 }
 
 #[derive(Default, Deserialize)]
@@ -73,6 +75,7 @@ struct FileConfig {
     rwkv_python: Option<String>,
     rwkv_model: Option<String>,
     rwkv_timeout_secs: Option<u64>,
+    jiten: Option<jiten::Settings>,
 }
 
 #[derive(Clone, Default)]
@@ -90,6 +93,7 @@ struct Config {
     rwkv_python: Option<String>,
     rwkv_model: Option<PathBuf>,
     rwkv_timeout_secs: u64,
+    jiten: jiten::Settings,
 }
 
 const DEFAULT_CONFIG: &str = r#"# Anki headless API server configuration.
@@ -114,6 +118,17 @@ sync_media = true
 # rwkv_python = "/absolute/path/to/anki/out/rwkv/venv/bin/python"
 # rwkv_model = "/absolute/path/to/anki/out/rwkv/model.pth"
 # rwkv_timeout_secs = 3600
+
+# Optional vocabulary export to Jiten; set ANKI_API_JITEN_API_KEY separately.
+# [jiten]
+# enabled = true
+# auto_sync = false # Preview manually first; set true for scheduled uploads.
+# interval_secs = 3600
+# sync_ankiweb_first = true
+# [[jiten.mappings]]
+# query = 'deck:Japanese note:Lapis'
+# word_field = "Expression"
+# reading_field = "Reading"
 "#;
 
 impl Config {
@@ -152,6 +167,7 @@ impl Config {
             .map(expand_home_path);
 
         Ok(Self {
+            jiten: file.jiten.unwrap_or_default(),
             host,
             port,
             api_key: env_string("ANKI_API_KEY").or(file.api_key),
@@ -578,7 +594,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let rwkv = rwkv::Controller::from_config(&backend, sync.clone(), gate.clone(), &config)
         .map_err(std::io::Error::other)?;
+    let jiten = jiten::Controller::new(backend.clone(), sync.clone(), gate.clone(), config.jiten)
+        .map_err(std::io::Error::other)?;
+    if let Some(controller) = &jiten {
+        controller.start_timer();
+    }
     let state = Arc::new(AppState {
+        jiten,
         gate,
         rwkv,
         backend,
@@ -604,6 +626,8 @@ fn build_app(state: Arc<AppState>) -> Router {
         .route("/v1/sync", post(sync))
         .route("/v1/sync/status", get(sync_status))
         .route("/v1/metrics", get(metrics_endpoint))
+        .route("/v1/jiten/sync", post(jiten::run))
+        .route("/v1/jiten/status", get(jiten::status))
         .route("/v1/rwkv/snapshot", post(rwkv_snapshot))
         .route("/v1/rwkv/run", post(rwkv::run))
         .route("/v1/rwkv/jobs/{job_id}", get(rwkv::status))
@@ -624,6 +648,8 @@ fn build_app(state: Arc<AppState>) -> Router {
                     // The worker owns the exclusive gate over sync, replay,
                     // apply and upload. Status and admission remain available.
                     let bypass = request.uri().path() == "/health"
+                        || request.uri().path() == "/v1/jiten/sync"
+                        || request.uri().path() == "/v1/jiten/status"
                         || request.uri().path() == "/v1/rwkv/run"
                         || request.uri().path().starts_with("/v1/rwkv/jobs/");
                     let _permit = if bypass {
@@ -2304,6 +2330,7 @@ mod tests {
         let state = Arc::new(AppState {
             gate: Arc::new(tokio::sync::RwLock::new(())),
             rwkv: None,
+            jiten: None,
             backend: init_backend(&BackendInit::default().encode_to_vec()).unwrap(),
             sync: None,
             api_key: Some("snapshot-test-key".into()),
@@ -2372,6 +2399,7 @@ mod tests {
         let state = Arc::new(AppState {
             gate: Arc::new(tokio::sync::RwLock::new(())),
             rwkv: None,
+            jiten: None,
             backend,
             sync: None,
             api_key: None,

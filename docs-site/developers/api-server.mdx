@@ -234,3 +234,90 @@ an initial migration from `:api-latest`, publish the new image before applying
 the changed deployment manifest. The image's Rust binary embeds the RWKV worker
 sources; running inference still requires a configured Python/PyTorch runtime
 and the pinned model, as described above.
+
+## Scheduled Jiten vocabulary sync
+
+The server can periodically send studied vocabulary and review history to
+[Jiten](https://jiten.moe), without AnkiConnect, a browser, or an external cron.
+This is a one-way Anki → Jiten import: it does not import Jiten reviews into
+Anki, delete Jiten words, or create new Anki cards.
+
+Generate a Jiten API key under Settings → Advanced → API Key. Set
+`ANKI_API_JITEN_API_KEY` in the server environment (this is separate from the
+local server's `ANKI_API_KEY`). Add the following to `~/.anki/server.toml`:
+
+```toml
+[jiten]
+enabled = true
+interval_secs = 3600
+sync_ankiweb_first = true
+# api_key = "..." # Environment variable takes precedence.
+
+[[jiten.mappings]]
+query = 'deck:Japanese note:Lapis'
+word_field = "Expression"
+reading_field = "Reading"
+```
+
+Use the actual field names in your note type. Multiple mapping tables are
+supported. The reading field is optional but recommended for distinguishing
+words with the same spelling. HTML ruby and Anki bracket furigana are cleaned
+before import. Missing fields fail the job, rather than silently exporting the
+wrong vocabulary.
+
+When enabled, a refresh runs at startup and then at the configured interval.
+Set `auto_sync = false` under `[jiten]` to enable only manual runs, for example
+while previewing field mappings before the first upload.
+AnkiWeb credentials must be configured when `sync_ankiweb_first` is true; they
+can be configured without also enabling the independent AnkiWeb timer. Set
+`sync_ankiweb_first = false` to export local progress only. Normal AnkiWeb sync
+must finish without requiring further action before an upload starts. An
+already-running AnkiWeb sync causes this attempt to fail; the next timer tick
+retries it. Only one Jiten job runs at a time, and missed timer ticks are skipped.
+
+Jiten's pre-export sync and snapshot share the server operation gate, so they
+wait for an exclusive RWKV job to finish. Jiten admission and status remain
+available while waiting. Uploads use the captured snapshot and do not hold the
+collection gate.
+
+A snapshot captures selected cards, note fields, scheduling, and review logs
+under one collection lock. Uploads run after releasing that lock. New/reset,
+suspended, empty-word, and unreviewed cards are skipped. Manual rescheduling
+entries are excluded from review history. For duplicate word/reading pairs,
+the card with the latest actual review is used (lowest card ID breaks ties),
+including that card's history. Use template filters in the query if only one
+learning modality should contribute.
+
+Jiten imports repeat the selected history with `overwrite = true`. Its importer
+merges reviews without duplicating timestamps, and adopts scheduling only when
+Anki's last review is newer. Consequently, a reschedule without a new review
+may not update Jiten's due date. Older Anki cards without FSRS memory state use
+interval/ease approximations. Jiten may also apply its own FSRS conversions and
+redundant-form rules, so schedules need not match exactly.
+
+Manual runs default to a read-only preview; previews do not sync AnkiWeb or
+contact Jiten. Send `dry_run: false` to upload:
+
+```bash
+curl -X POST http://127.0.0.1:8765/v1/jiten/sync \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $ANKI_API_KEY" \
+  -d '{"dry_run":true}'
+
+curl http://127.0.0.1:8765/v1/jiten/status \
+  -H "Authorization: Bearer $ANKI_API_KEY"
+```
+
+The trigger returns `202 Accepted`, or `409 Conflict` when a job is already
+running. Both endpoints require the local server's Bearer key when configured.
+Status includes local selection/skip counts, duplicate counts, Jiten's import
+counts, a bounded list of unmatched words/readings, last successful upload time,
+and errors. Status is in memory and resets on restart. An empty export counts
+as a successful refresh. No configuration or key is returned.
+
+Uploads use batches of at most 200 cards. Network failures, HTTP 429, and server
+errors receive bounded retries. Long retry delays defer work to the next run.
+A partial failure retains successful batch counts; the next run resends the
+selection. Library coverage refreshes asynchronously on Jiten after import.
+
+Run `just test-jiten` to check collection export and the mocked HTTP integration.

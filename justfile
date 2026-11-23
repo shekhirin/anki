@@ -231,3 +231,8 @@ rwkv-run *args:
 # Validate the main-branch container publishing workflow.
 check-api-image-workflow:
     uv run --no-config --python 3.12 --isolated --no-project --with check-jsonschema check-jsonschema --builtin-schema vendor.github-workflows .github/workflows/api-server-image.yml
+
+# Run native Jiten sync tests.
+test-jiten:
+    {{ ninja }} rslib:proto
+    cargo test -p anki -p anki-api-server jiten
