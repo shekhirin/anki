@@ -194,6 +194,30 @@ server. `rwkv_timeout_secs` defaults to 3600 and bounds inference. Environment
 overrides are `ANKI_API_RWKV_PYTHON`, `ANKI_API_RWKV_MODEL`, and
 `ANKI_API_RWKV_TIMEOUT_SECS`.
 
+To schedule daily inside the server, add this table to the same TOML file and
+restart. AnkiWeb credentials are required; scheduled jobs always apply and sync.
+The container already configures the runtime and model paths.
+
+```toml
+[rwkv]
+enabled = true
+time = "04:15"
+timezone = "Europe/London"
+query = 'deck:Japanese'
+retention = 0.9
+maximum_interval = 3650
+```
+
+`GET /v1/rwkv/status` reports the schedule, next run in UTC, running state, and
+last scheduled job ID/result. It requires Bearer authentication when configured.
+The daily timer follows the named timezone across daylight-saving changes. It
+does not run immediately at startup or catch up missed days. Nonexistent local
+times are skipped; repeated times run only once. Overlapping jobs and runs more
+than 30 minutes late are skipped until the next day. Reports remain in memory
+and reset on restart. No external cron or Kubernetes CronJob is needed.
+
+Manual previews and runs remain available:
+
 ```bash
 just rwkv-run --output out/rwkv/preview-job.json
 just rwkv-run --apply --output out/rwkv/nightly-job.json

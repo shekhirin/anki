@@ -10,6 +10,9 @@ use std::process::Stdio;
 
 use super::*;
 
+mod schedule;
+pub(super) use schedule::Settings;
+
 #[derive(Clone)]
 pub(super) struct Controller {
     backend: Backend,
@@ -18,6 +21,7 @@ pub(super) struct Controller {
     python: String,
     model: PathBuf,
     timeout: Duration,
+    schedule: Option<schedule::Schedule>,
     runtime: Arc<Runtime>,
 }
 
@@ -26,6 +30,7 @@ struct Runtime {
     running: AtomicBool,
     next_id: AtomicU64,
     jobs: Mutex<BTreeMap<String, Job>>,
+    timer: Mutex<schedule::TimerState>,
 }
 
 #[derive(Clone, Serialize)]
@@ -63,6 +68,19 @@ fn default_maximum_interval() -> u32 {
     3650
 }
 
+impl RunRequest {
+    fn validate(&self) -> Result<(), String> {
+        if !self.retention.is_finite()
+            || !(0.0..1.0).contains(&self.retention)
+            || self.retention == 0.0
+            || !(1..=10_000).contains(&self.maximum_interval)
+        {
+            return Err("invalid retention or maximum interval".into());
+        }
+        Ok(())
+    }
+}
+
 impl Controller {
     pub(super) fn from_config(
         backend: &Backend,
@@ -70,8 +88,12 @@ impl Controller {
         gate: Arc<tokio::sync::RwLock<()>>,
         config: &Config,
     ) -> Result<Option<Self>, String> {
+        let schedule = schedule::Schedule::new(&config.rwkv)?;
+        if schedule.is_some() && sync.is_none() {
+            return Err("nightly RWKV requires AnkiWeb sync credentials".into());
+        }
         match (&config.rwkv_python, &config.rwkv_model) {
-            (None, None) => Ok(None),
+            (None, None) if schedule.is_none() => Ok(None),
             (Some(python), Some(model)) => {
                 if !model.is_file() || config.rwkv_timeout_secs == 0 {
                     return Err(
@@ -94,6 +116,7 @@ impl Controller {
                     },
                     model: fs::canonicalize(model).map_err(|error| error.to_string())?,
                     timeout: Duration::from_secs(config.rwkv_timeout_secs),
+                    schedule,
                     runtime: Arc::new(Runtime::default()),
                 }))
             }
@@ -102,16 +125,9 @@ impl Controller {
     }
 
     fn start(&self, request: RunRequest) -> Result<String, (StatusCode, String)> {
-        if !request.retention.is_finite()
-            || !(0.0..1.0).contains(&request.retention)
-            || request.retention == 0.0
-            || !(1..=10_000).contains(&request.maximum_interval)
-        {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "invalid retention or maximum interval".into(),
-            ));
-        }
+        request
+            .validate()
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
         if request.sync && self.sync.is_none() {
             return Err((
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -450,6 +466,35 @@ pub(super) async fn status(
     }
 }
 
+pub(super) async fn schedule_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if !authenticated(&state, &headers) {
+        return error_response(StatusCode::UNAUTHORIZED, "invalid API key".into());
+    }
+    let Some(worker) = &state.rwkv else {
+        return Json(serde_json::json!({"configured": false, "running": false})).into_response();
+    };
+    let timer = worker.runtime.timer.lock().unwrap().clone();
+    let last_job = timer.last_job_id.as_ref().and_then(|id| {
+        worker.runtime.jobs.lock().unwrap().get(id).map(|job| {
+            serde_json::json!({
+                "job_id": job.job_id, "state": job.state, "phase": job.phase,
+                "applied_cards": job.applied_cards, "error": job.error,
+            })
+        })
+    });
+    Json(serde_json::json!({
+        "configured": true,
+        "running": worker.runtime.running.load(Ordering::Acquire),
+        "schedule": worker.schedule.as_ref().map(|schedule| &schedule.settings),
+        "timer": timer,
+        "last_job": last_job,
+    }))
+    .into_response()
+}
+
 pub(super) fn backend_error(error: anki::error::AnkiError) -> String {
     match error {
         anki::error::AnkiError::InvalidInput { source } => source.message,
@@ -619,6 +664,20 @@ mod tests {
         assert_eq!(accepted.status(), StatusCode::ACCEPTED);
         let accepted: serde_json::Value = accepted.json().await.unwrap();
         let id = accepted["job_id"].as_str().unwrap();
+        let schedule_status: serde_json::Value = tokio::time::timeout(
+            Duration::from_secs(1),
+            client
+                .get(format!("{base}/v1/rwkv/status"))
+                .bearer_auth("test-key")
+                .send(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(schedule_status["running"], true);
         let duplicate = client
             .post(&run_url)
             .bearer_auth("test-key")
@@ -729,6 +788,24 @@ mod tests {
     }
 
     #[test]
+    fn rwkv_schedule_requires_sync_credentials() {
+        let backend = init_backend(&BackendInit::default().encode_to_vec()).unwrap();
+        let config = Config {
+            rwkv: toml::from_str("enabled = true").unwrap(),
+            ..Config::default()
+        };
+        let error = Controller::from_config(
+            &backend,
+            None,
+            Arc::new(tokio::sync::RwLock::new(())),
+            &config,
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("sync credentials"));
+    }
+
+    #[test]
     #[ignore = "requires the pinned model and Python runtime; run just test-rwkv"]
     fn rwkv_job_recheck_preserves_newer_phone_scheduling() {
         let (worker, _directory, card_id) = fixture();
@@ -769,6 +846,7 @@ mod tests {
             python: executable.to_string_lossy().into_owned(),
             model: directory.path().join("unused"),
             timeout: Duration::from_millis(10),
+            schedule: None,
             runtime: Arc::new(Runtime::default()),
         };
         let started = Instant::now();

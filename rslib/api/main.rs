@@ -75,6 +75,7 @@ struct FileConfig {
     rwkv_python: Option<String>,
     rwkv_model: Option<String>,
     rwkv_timeout_secs: Option<u64>,
+    rwkv: Option<rwkv::Settings>,
     jiten: Option<jiten::Settings>,
 }
 
@@ -93,6 +94,7 @@ struct Config {
     rwkv_python: Option<String>,
     rwkv_model: Option<PathBuf>,
     rwkv_timeout_secs: u64,
+    rwkv: rwkv::Settings,
     jiten: jiten::Settings,
 }
 
@@ -118,6 +120,15 @@ sync_media = true
 # rwkv_python = "/absolute/path/to/anki/out/rwkv/venv/bin/python"
 # rwkv_model = "/absolute/path/to/anki/out/rwkv/model.pth"
 # rwkv_timeout_secs = 3600
+
+# Optional built-in daily scheduler (always applies changes and syncs AnkiWeb).
+# [rwkv]
+# enabled = true
+# time = "04:15"
+# timezone = "Europe/London"
+# query = 'deck:Japanese'
+# retention = 0.9
+# maximum_interval = 3650
 
 # Optional vocabulary export to Jiten; set ANKI_API_JITEN_API_KEY separately.
 # [jiten]
@@ -167,6 +178,7 @@ impl Config {
             .map(expand_home_path);
 
         Ok(Self {
+            rwkv: file.rwkv.unwrap_or_default(),
             jiten: file.jiten.unwrap_or_default(),
             host,
             port,
@@ -594,6 +606,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let rwkv = rwkv::Controller::from_config(&backend, sync.clone(), gate.clone(), &config)
         .map_err(std::io::Error::other)?;
+    if let Some(controller) = &rwkv {
+        controller.start_timer();
+    }
     let jiten = jiten::Controller::new(backend.clone(), sync.clone(), gate.clone(), config.jiten)
         .map_err(std::io::Error::other)?;
     if let Some(controller) = &jiten {
@@ -630,6 +645,7 @@ fn build_app(state: Arc<AppState>) -> Router {
         .route("/v1/jiten/status", get(jiten::status))
         .route("/v1/rwkv/snapshot", post(rwkv_snapshot))
         .route("/v1/rwkv/run", post(rwkv::run))
+        .route("/v1/rwkv/status", get(rwkv::schedule_status))
         .route("/v1/rwkv/jobs/{job_id}", get(rwkv::status))
         .route("/v1/collection/open", post(open_collection))
         .route("/v1/collection/close", post(close_collection))
@@ -651,6 +667,7 @@ fn build_app(state: Arc<AppState>) -> Router {
                         || request.uri().path() == "/v1/jiten/sync"
                         || request.uri().path() == "/v1/jiten/status"
                         || request.uri().path() == "/v1/rwkv/run"
+                        || request.uri().path() == "/v1/rwkv/status"
                         || request.uri().path().starts_with("/v1/rwkv/jobs/");
                     let _permit = if bypass {
                         None

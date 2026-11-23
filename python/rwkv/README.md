@@ -54,7 +54,29 @@ selects local-only operation; synced operation is the default.
 `rwkv-setup` installs the pinned Python/PyTorch runtime in `out/rwkv/venv`. The
 job client uses that interpreter directly, so cron does not need `uv` on PATH.
 
-## Cron
+## Built-in daily schedule
+
+After configuring the server's runtime and AnkiWeb credentials, add this to
+`~/.anki/server.toml` and restart:
+
+```toml
+[rwkv]
+enabled = true
+time = "04:15"
+timezone = "Europe/London"
+query = 'deck:Japanese'
+retention = 0.9
+maximum_interval = 3650
+```
+
+The timer uses the same coordinated job as the HTTP endpoint, with apply and
+sync enabled. Inspect `/v1/rwkv/status` for the next run and last scheduled job.
+It follows local calendar days, skips nonexistent DST times, and runs once at
+the first occurrence of a repeated time. There is no startup catch-up, overlap
+retry, or retry of a run more than 30 minutes late. Timer state and reports are
+in memory and reset on restart. No external cron is required.
+
+## Optional external cron
 
 For example, run daily at 04:15 in the cron host's timezone, after Anki's usual
 04:00 rollover. Use the actual absolute paths for the checkout and `just`:

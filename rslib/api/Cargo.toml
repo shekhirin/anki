@@ -16,6 +16,8 @@ name = "anki-api-server"
 anki = { workspace = true, features = ["rustls"] }
 anki_proto.workspace = true
 axum.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
 data-encoding.workspace = true
 dirs.workspace = true
 prost.workspace = true
