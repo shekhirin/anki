@@ -72,6 +72,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown -R anki:anki /config
 
 RUN python3 -m venv /opt/rwkv \
+    && /opt/rwkv/bin/pip install --no-cache-dir pip==25.3 \
     && /opt/rwkv/bin/pip install --no-cache-dir numpy==2.2.6 \
     && /opt/rwkv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.10.0
 ADD --checksum=sha256:67ee8e9b0d0169733242c40646e0d2e5637845a25775762002ffc4e6396f9590 \
