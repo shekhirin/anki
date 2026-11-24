@@ -102,7 +102,7 @@ def test_first_crossing_handles_non_monotonic_curves():
 
 
 def test_real_model_preview_is_deterministic_and_read_only():
-    model = Path("out/rwkv/model.pth")
+    model = Path("out/rwkv/model.bin")
     if not model.exists():
         pytest.fail("run just rwkv-model before just test-rwkv")
     data = snapshot()

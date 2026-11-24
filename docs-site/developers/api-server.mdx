@@ -189,7 +189,7 @@ just rwkv-setup
 ```
 
 Configure `rwkv_python` and `rwkv_model` in `~/.anki/server.toml` with absolute
-paths to `out/rwkv/venv/bin/python` and `out/rwkv/model.pth`, then restart the
+paths to `out/rwkv/venv/bin/python` and `out/rwkv/model.bin`, then restart the
 server. `rwkv_timeout_secs` defaults to 3600 and bounds inference. Environment
 overrides are `ANKI_API_RWKV_PYTHON`, `ANKI_API_RWKV_MODEL`, and
 `ANKI_API_RWKV_TIMEOUT_SECS`.
@@ -197,6 +197,13 @@ overrides are `ANKI_API_RWKV_PYTHON`, `ANKI_API_RWKV_MODEL`, and
 To schedule daily inside the server, add this table to the same TOML file and
 restart. AnkiWeb credentials are required; scheduled jobs always apply and sync.
 The container already configures the runtime and model paths.
+The default predictor is SM92, the original fork's Small interval model.
+Server jobs cache replay state beside the configured collection as
+`collection.rwkv-cache.pt`; `rwkv_cache_path` or `ANKI_API_RWKV_CACHE_PATH`
+overrides the path. On Kubernetes this stays on the collection's persistent
+volume. Only an unchanged history prefix is reused; older-history edits,
+context changes and model/source updates rebuild state. Intervals and due dates
+are always recomputed. Reports show `reviews_replayed` and `reviews_cached`.
 
 ```toml
 [rwkv]

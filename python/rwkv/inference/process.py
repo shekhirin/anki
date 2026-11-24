@@ -10,7 +10,6 @@ from typing import Any, cast
 
 import torch  # type: ignore[import-not-found]
 
-from .architecture import DEFAULT_ANKI_RWKV_CONFIG
 from .config import DAY_OFFSET_ENCODE_PERIODS, ID_ENCODE_DIMS, ID_SPLIT, RWKV_SUBMODULES
 from .features import (
     CARD_FEATURE_COLUMNS,
@@ -28,7 +27,8 @@ from .features import (
     scale_elapsed_seconds_cumulative,
     scale_state,
 )
-from .srs_model_rnn import SrsRWKVRnn
+from .id_rng import id_rng
+from .small import SmallSrsRWKVRnn, load_weights
 
 
 class RwkvInferenceProcess:
@@ -41,16 +41,17 @@ class RwkvInferenceProcess:
         device: torch.device,
         dtype: torch.dtype,
     ) -> None:
-        # Match the upstream runner's deterministic initialization before weights
-        # are loaded, as later ID encodings draw from the same torch RNG stream.
+        # ID features use the independent reference RNG below; model
+        # construction must not change their encoding stream.
         torch.manual_seed(2025)
-        self.rnn = SrsRWKVRnn(DEFAULT_ANKI_RWKV_CONFIG).to(device)
-        state_dict = torch.load(model_path, map_location=device, weights_only=True)
+        self.rnn = SmallSrsRWKVRnn().to(device)
+        state_dict = load_weights(model_path)
         self.rnn.load_state_dict(state_dict)
         self.rnn = self.rnn.selective_cast(dtype)
         self.rnn.eval()
         self.device = device
         self.dtype = dtype
+        self.id_rng = id_rng()
 
         self.card_states: dict[int, object | None] = {}
         self.note_states: dict[int, object | None] = {}
@@ -154,12 +155,33 @@ class RwkvInferenceProcess:
             elapsed_seconds,
             device=self.device,
         ).view(1, 1)
-        out_ahead_logits, out_w = curve
-        curve_probs_raw = self.rnn.forgetting_curve(out_w, elapsed_seconds_tensor)
-        curve_logits_raw = torch.log(curve_probs_raw / (1 - curve_probs_raw))
-        ahead_logit_residual = self.rnn.interp(out_ahead_logits, elapsed_seconds_tensor)
-        curve_logits = curve_logits_raw + ahead_logit_residual
-        return torch.sigmoid(curve_logits)
+        return self.curve_probabilities(curve, elapsed_seconds_tensor)
+
+    def curve_probabilities(self, curve, elapsed_seconds):
+        power, weights = curve
+        raw = self.rnn.forgetting_curve(weights, elapsed_seconds, power)
+        return torch.sigmoid(torch.logit(raw) + self.rnn.interp(power, elapsed_seconds))
+
+    def cache_state(self) -> dict[str, Any]:
+        """All recurrent, feature-counter and ID-encoding state, without weights."""
+        state = {
+            key: value
+            for key, value in vars(self).items()
+            if key not in ("rnn", "device", "dtype")
+        }
+        state["card_set"] = sorted(self.card_set)
+        state["id_rng"] = self.id_rng.getstate()
+        return state
+
+    def restore_cache_state(self, state: dict[str, Any]) -> None:
+        if state.keys() != self.cache_state().keys():
+            raise ValueError("incompatible RWKV cache state")
+        restored = dict(state)
+        restored["card_set"] = set(restored["card_set"])
+        generator = id_rng()
+        generator.setstate(restored["id_rng"])
+        restored["id_rng"] = generator
+        vars(self).update(restored)
 
     def _get_tensor(self, row: Mapping[str, object]) -> torch.Tensor:
         features = torch.tensor(
@@ -191,13 +213,15 @@ class RwkvInferenceProcess:
 
     def _generate_id_encoding(self, submodule: str) -> torch.Tensor:
         encode_dim = ID_ENCODE_DIMS[submodule]
-        return torch.randint(
-            low=0,
-            high=ID_SPLIT,
-            size=(encode_dim,),
+        return torch.tensor(
+            [
+                self.id_rng.getrandbits(32) % ID_SPLIT - (ID_SPLIT - 1) / 2
+                for _ in range(encode_dim)
+            ],
             device=self.device,
+            dtype=self.dtype,
             requires_grad=False,
-        ).to(self.dtype) - ((ID_SPLIT - 1) / 2)
+        )
 
     def _add_day_offset_encoding(
         self, features: torch.Tensor, row: Mapping[str, object]

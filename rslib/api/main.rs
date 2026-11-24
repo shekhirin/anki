@@ -74,6 +74,7 @@ struct FileConfig {
     sync_media: Option<bool>,
     rwkv_python: Option<String>,
     rwkv_model: Option<String>,
+    rwkv_cache_path: Option<String>,
     rwkv_timeout_secs: Option<u64>,
     rwkv: Option<rwkv::Settings>,
     jiten: Option<jiten::Settings>,
@@ -93,6 +94,7 @@ struct Config {
     sync_media: bool,
     rwkv_python: Option<String>,
     rwkv_model: Option<PathBuf>,
+    rwkv_cache_path: Option<PathBuf>,
     rwkv_timeout_secs: u64,
     rwkv: rwkv::Settings,
     jiten: jiten::Settings,
@@ -118,7 +120,8 @@ sync_media = true
 
 # Optional nightly RWKV worker. Run just rwkv-setup and just rwkv-model first.
 # rwkv_python = "/absolute/path/to/anki/out/rwkv/venv/bin/python"
-# rwkv_model = "/absolute/path/to/anki/out/rwkv/model.pth"
+# rwkv_model = "/absolute/path/to/anki/out/rwkv/model.bin"
+# rwkv_cache_path = "/path/to/collection.rwkv-cache.pt" # Defaults beside collection.
 # rwkv_timeout_secs = 3600
 
 # Optional built-in daily scheduler (always applies changes and syncs AnkiWeb).
@@ -196,6 +199,9 @@ impl Config {
             rwkv_python: env_string("ANKI_API_RWKV_PYTHON").or(file.rwkv_python),
             rwkv_model: env_string("ANKI_API_RWKV_MODEL")
                 .or(file.rwkv_model)
+                .map(expand_home_path),
+            rwkv_cache_path: env_string("ANKI_API_RWKV_CACHE_PATH")
+                .or(file.rwkv_cache_path)
                 .map(expand_home_path),
             rwkv_timeout_secs: match env_string("ANKI_API_RWKV_TIMEOUT_SECS") {
                 Some(value) => value

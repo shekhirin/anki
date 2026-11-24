@@ -75,17 +75,17 @@ RUN python3 -m venv /opt/rwkv \
     && /opt/rwkv/bin/pip install --no-cache-dir pip==25.3 \
     && /opt/rwkv/bin/pip install --no-cache-dir numpy==2.2.6 \
     && /opt/rwkv/bin/pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.10.0
-ADD --checksum=sha256:67ee8e9b0d0169733242c40646e0d2e5637845a25775762002ffc4e6396f9590 \
-    https://raw.githubusercontent.com/JSchoreels/anki/afa298cbe077b61fc42d214b2bf5898e300d3c98/qt/aqt/rwkv_inference/RWKV_trained_on_5000_10000.pth /opt/rwkv/model.pth
+ADD --checksum=sha256:4fbc5f963b6ef18d23dbc0f11358fed8a9c7c97c271d6eda95df3b8ed6fbeb6e \
+    https://raw.githubusercontent.com/JSchoreels/anki/afa298cbe077b61fc42d214b2bf5898e300d3c98/qt/aqt/rwkv_inference/sm92/weights.f32.bin /opt/rwkv/model.bin
 # Remote ADD defaults to root-only permissions; the server runs as anki.
-RUN chmod 644 /opt/rwkv/model.pth
+RUN chmod 644 /opt/rwkv/model.bin
 
 USER anki
 WORKDIR /config
 ENV ANKI_API_HOST=0.0.0.0
 ENV ANKI_API_PORT=8765
 ENV ANKI_API_RWKV_PYTHON=/opt/rwkv/bin/python
-ENV ANKI_API_RWKV_MODEL=/opt/rwkv/model.pth
+ENV ANKI_API_RWKV_MODEL=/opt/rwkv/model.bin
 
 VOLUME /config
 EXPOSE 8765

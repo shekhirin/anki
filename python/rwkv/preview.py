@@ -17,10 +17,11 @@ from pathlib import Path
 from typing import Any
 
 SOURCE_REVISION = "afa298cbe077b61fc42d214b2bf5898e300d3c98"
-MODEL_SHA256 = "67ee8e9b0d0169733242c40646e0d2e5637845a25775762002ffc4e6396f9590"
+MODEL_SHA256 = "4fbc5f963b6ef18d23dbc0f11358fed8a9c7c97c271d6eda95df3b8ed6fbeb6e"
+MODEL_NAME = "sm92"
 MODEL_URL = (
     f"https://raw.githubusercontent.com/JSchoreels/anki/{SOURCE_REVISION}/"
-    "qt/aqt/rwkv_inference/RWKV_trained_on_5000_10000.pth"
+    "qt/aqt/rwkv_inference/sm92/weights.f32.bin"
 )
 
 
@@ -105,18 +106,23 @@ def first_crossing(probabilities: list[float], retention: float) -> tuple[int, b
 
 
 def preview(
-    snapshot: dict[str, Any], model: Path, retention: float, maximum_interval: int
+    snapshot: dict[str, Any],
+    model: Path,
+    retention: float,
+    maximum_interval: int,
+    cache_path: Path | None = None,
 ) -> dict[str, Any]:
     if snapshot.get("version") != 1:
         raise ValueError("unsupported snapshot version")
     if not math.isfinite(retention) or not 0 < retention < 1:
         raise ValueError("retention must be between 0 and 1, exclusive")
-    # The reference model's interpolation grid ends at exp(21) seconds.
+    # Keep the same interval cap as the server's coordinated job API.
     if not 1 <= maximum_interval <= 10_000:
         raise ValueError("maximum interval must be between 1 and 10000 days")
     verify_model(model)
     import torch  # type: ignore[import-not-found]
 
+    from . import cache
     from .inference import RwkvInferenceProcess
 
     torch.set_num_threads(1)
@@ -125,12 +131,15 @@ def preview(
     )
     rows = history_rows(snapshot)
     eligible = {card["id"]: card for card in snapshot["cards"] if card["eligible"]}
-    latest: dict[int, tuple[dict[str, Any], Any]] = {}
+    identity = cache.engine_identity(MODEL_SHA256)
+    restored, latest = cache.restore(cache_path, runtime, rows, identity)
+    reused = restored or 0
     with torch.inference_mode():
-        for row in rows:
+        for row in rows[reused:]:
             curve = runtime.process_row(row)
-            if row["card_id"] in eligible:
-                latest[row["card_id"]] = (row, curve)
+            latest[row["card_id"]] = (row, curve)
+        if cache_path is not None and (restored is None or reused != len(rows)):
+            cache.save(cache_path, runtime, rows, latest, identity)
         elapsed = torch.arange(1, maximum_interval + 1, dtype=torch.float32).view(-1, 1)
         elapsed *= 86_400
         changes = []
@@ -139,9 +148,9 @@ def preview(
             if card_id not in latest:
                 continue
             row, (ahead, weights) = latest[card_id]
-            curve_probs = runtime.rnn.forgetting_curve(weights, elapsed)
-            residual = runtime.rnn.interp(ahead.expand(maximum_interval, -1), elapsed)
-            probabilities = torch.sigmoid(torch.logit(curve_probs) + residual).tolist()
+            probabilities = runtime.curve_probabilities(
+                (ahead, weights), elapsed
+            ).tolist()
             interval, capped = first_crossing(probabilities, retention)
             last_review_day = snapshot["today"] - (snapshot["day"] - row["day_offset"])
             # An overdue prediction stays due today; it never gains a fresh
@@ -163,6 +172,7 @@ def preview(
     return {
         "dry_run": True,
         "model_sha256": MODEL_SHA256,
+        "model": MODEL_NAME,
         "source_revision": SOURCE_REVISION,
         "snapshot_sha256": hashlib.sha256(
             json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
@@ -171,9 +181,11 @@ def preview(
         "today": snapshot["today"],
         "retention": retention,
         "maximum_interval": maximum_interval,
-        "reviews_replayed": len(rows),
+        "reviews_replayed": len(rows) - reused,
+        "reviews_cached": reused,
+        "reviews_total": len(rows),
         "eligible_cards": len(eligible),
-        "skipped_without_history": len(eligible) - len(latest),
+        "skipped_without_history": sum(card_id not in latest for card_id in eligible),
         "changed_cards": sum(
             change["old_due"] != change["proposed_due"]
             or change["old_interval"] != change["proposed_interval"]
@@ -200,6 +212,7 @@ def main() -> None:
     parser.add_argument("--retention", type=float, default=0.9)
     parser.add_argument("--maximum-interval", type=int, default=3650)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--cache", type=Path, help="persist replay state between runs")
     args = parser.parse_args()
     if args.download_model:
         download_model(args.download_model)
@@ -223,7 +236,9 @@ def main() -> None:
             snapshot = json.load(response)
     if args.save_snapshot:
         args.save_snapshot.write_text(json.dumps(snapshot))
-    report = preview(snapshot, args.model, args.retention, args.maximum_interval)
+    report = preview(
+        snapshot, args.model, args.retention, args.maximum_interval, args.cache
+    )
     rendered = json.dumps(report, indent=2, allow_nan=False) + "\n"
     if args.output:
         args.output.write_text(rendered)
