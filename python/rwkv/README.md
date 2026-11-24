@@ -24,12 +24,15 @@ sync_username = "your-ankiweb-user"
 sync_password = "your-password"
 # sync_endpoint = "https://sync.ankiweb.net"
 rwkv_python = "/path/to/anki/out/rwkv/venv/bin/python"
-rwkv_model = "/path/to/anki/out/rwkv/model.pth"
+rwkv_model = "/path/to/anki/out/rwkv/model.bin"
+# Optional: defaults to collection.rwkv-cache.pt beside collection.anki2.
+# rwkv_cache_path = "/path/to/collection.rwkv-cache.pt"
 rwkv_timeout_secs = 3600
 ```
 
 The corresponding environment overrides are `ANKI_API_RWKV_PYTHON`,
-`ANKI_API_RWKV_MODEL`, and `ANKI_API_RWKV_TIMEOUT_SECS`. The timeout bounds
+`ANKI_API_RWKV_MODEL`, `ANKI_API_RWKV_CACHE_PATH`, and
+`ANKI_API_RWKV_TIMEOUT_SECS`. The timeout bounds
 inference, not network sync. Runtime and model settings are supplied by the
 server administrator; HTTP requests cannot select programs or model paths.
 
@@ -141,9 +144,12 @@ All RWKV endpoints use `Authorization: Bearer <key>` when an API key is configur
 The original read-only preview command remains available:
 
 ```sh
-just rwkv-preview out/rwkv/model.pth --query 'deck:Default' --retention 0.9 --output out/rwkv/report.json --save-snapshot out/rwkv/snapshot.json
-just rwkv-preview out/rwkv/model.pth --snapshot out/rwkv/snapshot.json --output out/rwkv/report.json
+just rwkv-preview out/rwkv/model.bin --query 'deck:Default' --retention 0.9 --output out/rwkv/report.json --save-snapshot out/rwkv/snapshot.json
+just rwkv-preview out/rwkv/model.bin --snapshot out/rwkv/snapshot.json --output out/rwkv/report.json
 ```
+
+Add `--cache /path/to/replay.pt` to reuse replay state in offline previews.
+Without this option offline previews rebuild state and do not write a cache.
 
 Snapshots contain review metadata and IDs, without note text or media. Offline
 reports cannot be submitted directly as writes: the server job owns snapshot
@@ -170,9 +176,32 @@ capture, inference, validation, and apply.
   if overdue. An interval never starts afresh from the nightly run time.
 - Reports include unchanged targets with active history. Due-by-tomorrow counts
   cover these targets only, including backlog, not the full collection workload.
-- Each run rebuilds state from the complete snapshot. CPU reference inference
-  can be slow and memory intensive on large collections. Incremental checkpoints
-  and GPU inference are not implemented.
+- The interval predictor is SM92, the original fork's Small family's two-head
+  model. The separate Instant-only model is unnecessary for nightly intervals.
+  CPU float32 inference is used; GPU inference is not implemented.
+
+## Replay cache
+
+Server jobs persist recurrent card, note, deck, preset and global state, feature
+counters, ID encodings and their RNG state, and each card's latest curve. With
+`collection_path` configured, the cache defaults to the same path with extension
+`.rwkv-cache.pt`, on the pod's persistent volume. Set `rwkv_cache_path` or
+`ANKI_API_RWKV_CACHE_PATH` to override it. Without either a collection path or an
+explicit cache path, server jobs run without persistent caching.
+
+Before resuming, the worker verifies that the cached normalized review inputs
+are an exact prefix of the current replay. Appended reviews replay only the new
+suffix. Edited, deleted, reset or backdated history, and changed note/deck/preset
+identities, rebuild shared state. Model, runtime or inference-source changes
+invalidate the checkpoint. Missing, incompatible or corrupt caches rebuild.
+
+Due dates, target queries, retention and interval caps are recomputed from the
+current snapshot and are never cached. Atomic checkpoint replacement preserves
+the previous complete cache if writing fails. Cache files contain local review
+metadata and model state and should have the same access controls as the
+collection. Deleting a cache is safe; the next job replays the full history.
+Reports expose `reviews_replayed`, `reviews_cached` and `reviews_total`.
+Snapshot validation and the final AnkiWeb recheck still guard every apply.
 
 ## Provenance
 
@@ -184,13 +213,17 @@ The spaced-repetition adaptation originates in
 This uses PyTorch, not the fork's optimized Rust engine or the separately
 licensed RWKV-SRS runtime.
 
-The model is downloaded explicitly from the same commit, outside tracked source.
+The SM92 float32 model is downloaded explicitly from the same commit, outside
+tracked source.
 Its SHA-256 is
-`67ee8e9b0d0169733242c40646e0d2e5637845a25775762002ffc4e6396f9590`.
+`4fbc5f963b6ef18d23dbc0f11358fed8a9c7c97c271d6eda95df3b8ed6fbeb6e`.
 Other artifacts, including Instant-only and incompatible models, are rejected.
-This does not claim parity with the fork's newer small/tiny models or desktop
-queue behavior. Worker sources are embedded in the server binary, so deployed
-servers do not need a separate source checkout for inference.
+The small model's interleaved architecture and power curve are ported from
+`rslib/src/rwkv/{architecture,engine}.rs` at that commit; numerical tests compare
+against its published SM92 vectors. Desktop queue behavior and the original
+checkpoint file format are not implemented. Worker sources are embedded in the
+server binary, so deployed servers do not need a separate source checkout for
+inference.
 
 ## Verification
 

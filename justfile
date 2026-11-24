@@ -198,10 +198,10 @@ api-server:
 
 # Download the pinned AGPL reference model and verify its checksum.
 rwkv-model:
-    PYTHONPATH=python uv run --no-config --python 3.12 --isolated --no-project python -m rwkv.preview --download-model out/rwkv/model.pth
+    PYTHONPATH=python uv run --no-config --python 3.12 --isolated --no-project python -m rwkv.preview --download-model out/rwkv/model.bin
 
 # Preview RWKV-Curve scheduling; never writes to the collection.
-rwkv-preview model='out/rwkv/model.pth' *args:
+rwkv-preview model='out/rwkv/model.bin' *args:
     PYTHONPATH=python uv run --no-config --python 3.12 --isolated --no-project --with torch==2.10.0 python -m rwkv.preview --model '{{ model }}' {{ args }}
 
 # Check the RWKV snapshot and model preview, including real inference.

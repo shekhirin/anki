@@ -20,6 +20,7 @@ pub(super) struct Controller {
     gate: Arc<tokio::sync::RwLock<()>>,
     python: String,
     model: PathBuf,
+    cache_path: Option<PathBuf>,
     timeout: Duration,
     schedule: Option<schedule::Schedule>,
     runtime: Arc<Runtime>,
@@ -115,6 +116,12 @@ impl Controller {
                         python.clone()
                     },
                     model: fs::canonicalize(model).map_err(|error| error.to_string())?,
+                    cache_path: config.rwkv_cache_path.clone().or_else(|| {
+                        config
+                            .collection_path
+                            .as_ref()
+                            .map(|path| path.with_extension("rwkv-cache.pt"))
+                    }),
                     timeout: Duration::from_secs(config.rwkv_timeout_secs),
                     schedule,
                     runtime: Arc::new(Runtime::default()),
@@ -308,11 +315,18 @@ impl Controller {
         )
         .map_err(|error| error.to_string())?;
         let stderr = fs::File::create(&stderr_path).map_err(|error| error.to_string())?;
-        let mut child = Command::new(&self.python)
+        let mut command = Command::new(&self.python);
+        command.args(["-m", "rwkv.preview"]);
+        if let Some(path) = &self.cache_path {
+            command
+                .arg("--cache")
+                .arg(std::path::absolute(path).map_err(|error| error.to_string())?);
+        }
+        let mut child = command
             .current_dir(directory.path())
             .env("PYTHONPATH", directory.path())
             .env("PYTHONDONTWRITEBYTECODE", "1")
-            .args(["-m", "rwkv.preview", "--model"])
+            .arg("--model")
             .arg(&self.model)
             .arg("--snapshot")
             .arg(input)
@@ -368,6 +382,15 @@ fn install_worker(root: &FsPath) -> Result<(), String> {
     const FILES: &[(&str, &str)] = &[
         ("__init__.py", include_str!("../../python/rwkv/__init__.py")),
         ("preview.py", include_str!("../../python/rwkv/preview.py")),
+        ("cache.py", include_str!("../../python/rwkv/cache.py")),
+        (
+            "inference/id_rng.py",
+            include_str!("../../python/rwkv/inference/id_rng.py"),
+        ),
+        (
+            "inference/small.py",
+            include_str!("../../python/rwkv/inference/small.py"),
+        ),
         (
             "inference/__init__.py",
             include_str!("../../python/rwkv/inference/__init__.py"),
@@ -553,7 +576,8 @@ mod tests {
         backend.api_update_card(card).unwrap();
         let config = Config {
             rwkv_python: Some(python),
-            rwkv_model: Some(root.join("out/rwkv/model.pth")),
+            rwkv_model: Some(root.join("out/rwkv/model.bin")),
+            rwkv_cache_path: Some(directory.path().join("replay.pt")),
             rwkv_timeout_secs: 30,
             ..Config::default()
         };
@@ -732,7 +756,8 @@ mod tests {
         let repeat = completed(&client, &base, repeat["job_id"].as_str().unwrap()).await;
         assert_eq!(repeat["state"], "succeeded", "{repeat}");
         assert_eq!(repeat["applied_cards"], 0);
-        assert_eq!(repeat["report"]["reviews_replayed"], 1);
+        assert_eq!(repeat["report"]["reviews_replayed"], 0);
+        assert_eq!(repeat["report"]["reviews_cached"], 1);
         server.abort();
     }
 
@@ -845,6 +870,7 @@ mod tests {
             gate: Arc::new(tokio::sync::RwLock::new(())),
             python: executable.to_string_lossy().into_owned(),
             model: directory.path().join("unused"),
+            cache_path: None,
             timeout: Duration::from_millis(10),
             schedule: None,
             runtime: Arc::new(Runtime::default()),
