@@ -12,7 +12,7 @@ import gzip
 import json
 from pathlib import Path
 
-import torch
+import torch  # type: ignore[import-not-found]
 from rwkv.inference import RwkvInferenceProcess
 from rwkv.inference.id_rng import id_rng
 
@@ -76,7 +76,10 @@ def test_sm92_matches_reference_model_vectors():
         sequences = json.load(stream)
     with torch.inference_mode():
         for sequence in sequences:
-            card_states, deck_states, note_states, preset_states = {}, {}, {}, {}
+            card_states: dict[int, object] = {}
+            deck_states: dict[int, object] = {}
+            note_states: dict[int, object] = {}
+            preset_states: dict[int, object] = {}
             global_state = None
             for row in sequence["rows"]:
                 card_id, deck_id, note_id, preset_id, _ = row["ids"]

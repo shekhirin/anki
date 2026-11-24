@@ -4,10 +4,10 @@
 from pathlib import Path
 
 import pytest
-import torch
+import torch  # type: ignore[import-not-found]
 from rwkv import cache
 from rwkv.preview import preview
-from test_preview import snapshot
+from rwkv.tests.test_preview import snapshot
 
 MODEL = Path("out/rwkv/model.bin")
 

@@ -136,7 +136,7 @@ class SmallSrsRWKVRnn(nn.Module):
         features[..., 22] = 0  # The small model never uses scaled_state.
         x = self.features2card(features)
         states = (card, deck, note, preset, global_state)
-        next_states = [{} for _ in LAYER_COUNTS]
+        next_states: list[dict[int, object]] = [{} for _ in LAYER_COUNTS]
         v0 = [None] * 5
         for module, layer in LAYER_STEPS:
             block = self.rwkv_modules[module].blocks[layer]
