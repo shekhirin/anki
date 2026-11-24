@@ -299,8 +299,8 @@ AnkiWeb credentials must be configured when `sync_ankiweb_first` is true; they
 can be configured without also enabling the independent AnkiWeb timer. Set
 `sync_ankiweb_first = false` to export local progress only. Normal AnkiWeb sync
 must finish without requiring further action before an upload starts. An
-already-running AnkiWeb sync causes this attempt to fail; the next timer tick
-retries it. Only one Jiten job runs at a time, and missed timer ticks are skipped.
+already-running AnkiWeb sync delays capture until sync admission is available.
+Only one Jiten job runs at a time, and missed timer ticks are skipped.
 
 Jiten's pre-export sync and snapshot share the server operation gate, so they
 wait for an exclusive RWKV job to finish. Jiten admission and status remain

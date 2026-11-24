@@ -182,7 +182,28 @@ impl Controller {
     async fn snapshot(&self, dry_run: bool) -> Result<Snapshot, String> {
         // Timer-triggered exports bypass HTTP middleware. Share the operation
         // gate so AnkiWeb sync and capture wait for any exclusive RWKV job.
-        let permit = self.gate.clone().read_owned().await;
+        let (permit, reservation) = loop {
+            let permit = self.gate.clone().read_owned().await;
+            let reservation = if let Some(sync) = &self.sync {
+                if sync
+                    .runtime
+                    .in_progress
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    // A timer sync may already have reserved admission while
+                    // waiting for the gate. Release it before waiting so a
+                    // queued RWKV writer cannot deadlock both readers.
+                    drop(permit);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                Some(SyncReservation(sync.runtime.clone()))
+            } else {
+                None
+            };
+            break (permit, reservation);
+        };
         let worker = self.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -190,15 +211,7 @@ impl Controller {
             // Holding the reservation through capture prevents a sync from replacing the
             // collection.
             let sync = worker.sync.as_ref();
-            let _reservation = match sync {
-                Some(sync) => {
-                    if sync.runtime.in_progress.swap(true, Ordering::AcqRel) {
-                        return Err("AnkiWeb sync is busy; retry Jiten sync later".into());
-                    }
-                    Some(SyncReservation(sync.runtime.clone()))
-                }
-                None => None,
-            };
+            let _reservation = reservation;
             if worker.settings.sync_ankiweb_first && !dry_run {
                 let sync = sync.ok_or("AnkiWeb sync is not configured")?;
                 let result = sync
@@ -543,11 +556,30 @@ mod tests {
             runtime: runtime.clone(),
             gate: worker.gate.clone(),
         });
-        assert!(worker.snapshot(true).await.err().unwrap().contains("busy"));
+        let mut snapshot = Box::pin(worker.snapshot(true));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut snapshot)
+                .await
+                .is_err()
+        );
         assert!(runtime.in_progress.load(Ordering::Acquire));
+        // Waiting for sync must not hold the read gate and block RWKV.
+        let exclusive =
+            tokio::time::timeout(Duration::from_secs(1), worker.gate.clone().write_owned())
+                .await
+                .unwrap();
         runtime.in_progress.store(false, Ordering::Release);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut snapshot)
+                .await
+                .is_err()
+        );
+        drop(exclusive);
         // No collection is open, so capture fails after acquiring the reservation.
-        assert!(worker.snapshot(true).await.is_err());
+        assert!(tokio::time::timeout(Duration::from_secs(1), snapshot)
+            .await
+            .unwrap()
+            .is_err());
         assert!(!runtime.in_progress.load(Ordering::Acquire));
     }
 
