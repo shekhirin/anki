@@ -178,6 +178,18 @@ impl super::SqliteStorage {
             .collect()
     }
 
+    /// Returns [(nid, field 0)] for every note type with the same checksum.
+    /// The caller must compare the fields to account for checksum collisions.
+    pub(crate) fn note_fields_by_checksum_all_types(
+        &self,
+        csum: u32,
+    ) -> Result<Vec<(NoteId, String)>> {
+        self.db
+            .prepare("select id, field_at_index(flds, 0) from notes where csum=?")?
+            .query_and_then(params![csum], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+    }
+
     /// Returns [(nid, field 0)] of notes with the same checksum.
     /// The caller should strip the fields and compare to see if they actually
     /// match.

@@ -45,6 +45,17 @@ impl Backend {
         })
     }
 
+    pub fn api_matching_first_field_note_ids(
+        &self,
+        first_field: String,
+        notetype_id: Option<i64>,
+    ) -> Result<Vec<i64>> {
+        self.with_col(|col| {
+            col.matching_first_field_note_ids(&first_field, notetype_id.map(Into::into))
+                .map(|ids| ids.into_iter().map(|id| id.0).collect())
+        })
+    }
+
     pub fn api_notetype_names(&self) -> Result<Vec<(i64, String)>> {
         self.with_col(|col| {
             NotetypesService::get_notetype_names(col).map(|names| {

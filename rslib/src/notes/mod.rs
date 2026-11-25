@@ -632,6 +632,31 @@ impl Collection {
             }))
     }
 
+    /// Find notes whose first field matches, optionally across all note types.
+    pub(crate) fn matching_first_field_note_ids(
+        &self,
+        first_field: &str,
+        notetype_id: Option<NotetypeId>,
+    ) -> Result<Vec<NoteId>> {
+        let normalized = if self.get_config_bool(BoolKey::NormalizeNoteText) {
+            normalize_to_nfc(first_field)
+        } else {
+            first_field.into()
+        };
+        let stripped = strip_html_preserving_media_filenames(&normalized);
+        let checksum = field_checksum(&stripped);
+        let candidates = match notetype_id {
+            Some(id) => self.storage.note_fields_by_checksum(id, checksum)?,
+            None => self.storage.note_fields_by_checksum_all_types(checksum)?,
+        };
+        Ok(candidates
+            .into_iter()
+            .filter_map(|(id, field)| {
+                (strip_html_preserving_media_filenames(&field) == stripped).then_some(id)
+            })
+            .collect())
+    }
+
     fn field_cloze_check(&mut self, note: &Note) -> Result<NoteFieldsState> {
         let notetype = self
             .get_notetype(note.notetype_id)?
@@ -704,6 +729,28 @@ mod test {
     fn test_field_checksum() {
         assert_eq!(field_checksum("test"), 2840236005);
         assert_eq!(field_checksum("今日"), 1464653051);
+    }
+
+    #[test]
+    fn matching_first_field_can_include_other_note_types() -> Result<()> {
+        let mut col = Collection::new();
+        let basic = col.get_notetype_by_name("basic")?.unwrap();
+        let reversed = col
+            .get_notetype_by_name("basic (and reversed card)")?
+            .unwrap();
+        let mut note = basic.new_note();
+        note.fields[0] = "見る".into();
+        col.add_note(&mut note, DeckId(1))?;
+
+        assert!(col
+            .matching_first_field_note_ids("見る", Some(reversed.id))?
+            .is_empty());
+        assert_eq!(
+            col.matching_first_field_note_ids("見る", None)?,
+            vec![note.id]
+        );
+        assert!(col.matching_first_field_note_ids("見", None)?.is_empty());
+        Ok(())
     }
 
     #[test]

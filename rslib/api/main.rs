@@ -355,6 +355,8 @@ struct AnkiConnectNoteInput {
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
+    options: serde_json::Value,
+    #[serde(default)]
     audio: Vec<AnkiConnectMediaInput>,
     #[serde(default)]
     video: Vec<AnkiConnectMediaInput>,
@@ -419,10 +421,10 @@ fn add_anki_connect_note(
     mut input: AnkiConnectNoteInput,
 ) -> Result<i64, String> {
     let deck_id = backend
-        .api_deck_id_by_name(input.deck_name)
+        .api_deck_id_by_name(input.deck_name.clone())
         .map_err(|error| error.to_string())?;
     let notetype_id = backend
-        .api_notetype_id_by_name(input.model_name)
+        .api_notetype_id_by_name(input.model_name.clone())
         .map_err(|error| error.to_string())?;
     let notetype = backend
         .api_notetype(notetype_id)
@@ -436,6 +438,17 @@ fn add_anki_connect_note(
     }
     for media in input.picture {
         append_anki_connect_media(backend, &mut input.fields, media, true)?;
+    }
+
+    let candidate = serde_json::json!({
+        "deckName": &input.deck_name,
+        "modelName": &input.model_name,
+        "fields": &input.fields,
+        "options": &input.options,
+    });
+    let (can_add, error) = can_add_note_with_error(backend, &candidate);
+    if !can_add {
+        return Err(error.unwrap_or_else(|| "cannot create note".into()));
     }
 
     let fields = notetype
@@ -985,7 +998,7 @@ fn can_add_note_with_error(
             Some(format!("field is required: {}", first_field.name)),
         );
     };
-    if value.is_empty() {
+    if value.trim().is_empty() {
         return (false, Some("first field is empty".into()));
     }
     let allow_duplicate = candidate
@@ -996,8 +1009,14 @@ fn can_add_note_with_error(
     if allow_duplicate {
         return (true, None);
     }
-    let query = format!("{}:\"{}\"", first_field.name, value.replace('"', ""));
-    match backend.api_search_notes(query) {
+    let check_all_models = candidate
+        .get("options")
+        .and_then(|options| options.get("duplicateScopeOptions"))
+        .and_then(|options| options.get("checkAllModels"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let notetype_id = (!check_all_models).then_some(model_id);
+    match backend.api_matching_first_field_note_ids(value.to_owned(), notetype_id) {
         Ok(ids) if ids.is_empty() => (true, None),
         Ok(_) => (
             false,
@@ -1263,58 +1282,8 @@ async fn execute_anki_connect_request(
             let backend = state.backend.clone();
             let can_add = tokio::task::spawn_blocking(move || {
                 candidates
-                    .into_iter()
-                    .map(|candidate| {
-                        let deck_name = candidate
-                            .get("deckName")
-                            .and_then(serde_json::Value::as_str);
-                        let model_name = candidate
-                            .get("modelName")
-                            .and_then(serde_json::Value::as_str);
-                        let fields = candidate
-                            .get("fields")
-                            .and_then(serde_json::Value::as_object);
-                        let allow_duplicate = candidate
-                            .get("options")
-                            .and_then(|options| options.get("allowDuplicate"))
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false);
-                        let (Some(deck_name), Some(model_name), Some(fields)) =
-                            (deck_name, model_name, fields)
-                        else {
-                            return false;
-                        };
-                        if backend.api_deck_id_by_name(deck_name.to_owned()).is_err() {
-                            return false;
-                        }
-                        let model_id = match backend.api_notetype_id_by_name(model_name.to_owned())
-                        {
-                            Ok(id) => id,
-                            Err(_) => return false,
-                        };
-                        let model = match backend.api_notetype(model_id) {
-                            Ok(model) => model,
-                            Err(_) => return false,
-                        };
-                        let Some(first_field) = model.fields.first() else {
-                            return false;
-                        };
-                        let Some(value) = fields
-                            .get(&first_field.name)
-                            .and_then(serde_json::Value::as_str)
-                        else {
-                            return false;
-                        };
-                        if value.is_empty() || allow_duplicate {
-                            return !value.is_empty();
-                        }
-                        let escaped = value.replace('"', "");
-                        let query = format!("{}:\"{}\"", first_field.name, escaped);
-                        backend
-                            .api_search_notes(query)
-                            .map(|ids| ids.is_empty())
-                            .unwrap_or(false)
-                    })
+                    .iter()
+                    .map(|candidate| can_add_note_with_error(&backend, candidate).0)
                     .collect::<Vec<_>>()
             })
             .await
@@ -2346,6 +2315,63 @@ mod tests {
         assert_eq!(input.audio.len(), 1);
         assert_eq!(input.picture.len(), 1);
         assert!(input.video.is_empty());
+    }
+
+    #[test]
+    fn ankiconnect_checks_duplicates_across_note_types_when_requested() {
+        let backend = init_backend(
+            &BackendInit {
+                preferred_langs: vec!["en".into()],
+                server: false,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        )
+        .unwrap();
+        let tempdir = tempfile::tempdir().unwrap();
+        let collection_path = tempdir.path().join("collection.anki2");
+        backend
+            .open_collection(OpenCollectionRequest {
+                collection_path: collection_path.to_string_lossy().into_owned(),
+                media_folder_path: collection_path
+                    .with_extension("media")
+                    .to_string_lossy()
+                    .into_owned(),
+                media_db_path: collection_path
+                    .with_extension("mdb")
+                    .to_string_lossy()
+                    .into_owned(),
+            })
+            .unwrap();
+
+        let basic_id = backend.api_notetype_id_by_name("Basic".into()).unwrap();
+        backend
+            .api_add_note(1, basic_id, vec!["見る".into(), "to see".into()], vec![])
+            .unwrap();
+        let candidate = serde_json::json!({
+            "deckName": "Default",
+            "modelName": "Basic (and reversed card)",
+            "fields": {"Front": "見る", "Back": "to see"},
+        });
+        assert!(can_add_note_with_error(&backend, &candidate).0);
+
+        let mut cross_model = candidate.clone();
+        cross_model["options"] = serde_json::json!({
+            "duplicateScope": "collection",
+            "duplicateScopeOptions": {"checkAllModels": true},
+        });
+        assert_eq!(
+            can_add_note_with_error(&backend, &cross_model),
+            (
+                false,
+                Some("cannot create note because it is a duplicate".into())
+            )
+        );
+        let input: AnkiConnectNoteInput = serde_json::from_value(cross_model).unwrap();
+        assert_eq!(
+            add_anki_connect_note(&backend, input).unwrap_err(),
+            "cannot create note because it is a duplicate"
+        );
     }
 
     #[tokio::test]
